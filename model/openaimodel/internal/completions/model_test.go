@@ -12,13 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package openaimodel
+package completions
 
 import (
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -26,9 +27,11 @@ import (
 	"time"
 
 	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/option"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/model/openaimodel/internal/openaicommon"
 )
 
 // chatRig serves one canned body and records the path and body it was asked
@@ -55,16 +58,7 @@ func newChatRig(t *testing.T, handler func(w http.ResponseWriter, r *http.Reques
 
 func (r *chatRig) model(t *testing.T) model.LLM {
 	t.Helper()
-	llm, err := NewModel(t.Context(), "gpt-4o-mini", &ClientConfig{
-		APIKey:     "test",
-		BaseURL:    r.server.URL + "/v1",
-		HTTPClient: r.server.Client(),
-		API:        APIChatCompletions,
-	})
-	if err != nil {
-		t.Fatalf("NewModel() err = %v", err)
-	}
-	return llm
+	return newCompletionsModel(t, r.server)
 }
 
 func chatJSON(body string) func(http.ResponseWriter, *http.Request) {
@@ -107,63 +101,18 @@ func askChat(t *testing.T, llm model.LLM, stream bool) ([]*model.LLMResponse, er
 	return got, firstErr
 }
 
-func TestNewModel_SelectsAPI(t *testing.T) {
-	tests := []struct {
-		name     string
-		api      API
-		wantPath string
-	}{
-		{name: "zero value keeps Responses", api: "", wantPath: "/v1/responses"},
-		{name: "explicit Responses", api: APIResponses, wantPath: "/v1/responses"},
-		{name: "chat completions", api: APIChatCompletions, wantPath: "/v1/chat/completions"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			rig := newChatRig(t, func(w http.ResponseWriter, _ *http.Request) {
-				w.WriteHeader(http.StatusInternalServerError)
-			})
-			llm, err := NewModel(t.Context(), "gpt-4o-mini", &ClientConfig{
-				APIKey:     "test",
-				BaseURL:    rig.server.URL + "/v1",
-				HTTPClient: rig.server.Client(),
-				API:        tt.api,
-			})
-			if err != nil {
-				t.Fatalf("NewModel() err = %v", err)
-			}
-			_, _ = askChat(t, llm, false)
-			if len(rig.paths) == 0 {
-				t.Fatal("no request reached the server")
-			}
-			if rig.paths[0] != tt.wantPath {
-				t.Errorf("path = %q, want %q", rig.paths[0], tt.wantPath)
-			}
-		})
-	}
-}
-
-func TestNewModel_RejectsUnknownAPI(t *testing.T) {
-	_, err := NewModel(t.Context(), "m", &ClientConfig{APIKey: "k", API: "grpc"})
-	if !errors.Is(err, ErrUnsupportedAPI) {
-		t.Fatalf("err = %v, want %v", err, ErrUnsupportedAPI)
-	}
-	if !strings.Contains(err.Error(), "grpc") {
-		t.Errorf("err = %v, want it to name the value", err)
-	}
-}
-
-func TestChatModel_GenerateContent_NilRequest(t *testing.T) {
+func TestModel_GenerateContent_NilRequest(t *testing.T) {
 	rig := newChatRig(t, chatJSON(`{}`))
 	for _, err := range rig.model(t).GenerateContent(t.Context(), nil, false) {
-		if !errors.Is(err, ErrRequestNil) {
-			t.Fatalf("err = %v, want %v", err, ErrRequestNil)
+		if !errors.Is(err, openaicommon.ErrRequestNil) {
+			t.Fatalf("err = %v, want %v", err, openaicommon.ErrRequestNil)
 		}
 		return
 	}
 	t.Fatal("no response yielded")
 }
 
-func TestChatModel_GenerateContent_Text(t *testing.T) {
+func TestModel_GenerateContent_Text(t *testing.T) {
 	rig := newChatRig(t, chatJSON(`{"id":"c1","model":"gpt-4o-mini",
 		"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"sunny"}}],
 		"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}`))
@@ -187,7 +136,7 @@ func TestChatModel_GenerateContent_Text(t *testing.T) {
 	}
 }
 
-func TestChatModel_GenerateContent_ServerError(t *testing.T) {
+func TestModel_GenerateContent_ServerError(t *testing.T) {
 	rig := newChatRig(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusTooManyRequests)
 		_, _ = fmt.Fprint(w, `{"error":{"message":"slow down"}}`)
@@ -199,7 +148,7 @@ func TestChatModel_GenerateContent_ServerError(t *testing.T) {
 	}
 }
 
-func TestChatModel_GenerateStream_TextDeltas(t *testing.T) {
+func TestModel_GenerateStream_TextDeltas(t *testing.T) {
 	rig := newChatRig(t, chatSSE(
 		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"hail "}}]}`,
 		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"at -7 C"}}]}`,
@@ -233,10 +182,10 @@ func TestChatModel_GenerateStream_TextDeltas(t *testing.T) {
 	}
 }
 
-// TestChatModel_GenerateStream_ToolArgumentsAcrossChunks covers the shape this
+// TestModel_GenerateStream_ToolArgumentsAcrossChunks covers the shape this
 // endpoint has no event for: arguments arrive in fragments and the call is
 // complete only once the stream ends.
-func TestChatModel_GenerateStream_ToolArgumentsAcrossChunks(t *testing.T) {
+func TestModel_GenerateStream_ToolArgumentsAcrossChunks(t *testing.T) {
 	rig := newChatRig(t, chatSSE(
 		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":""}}]}}]}`,
 		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"city\":"}}]}}]}`,
@@ -265,7 +214,7 @@ func TestChatModel_GenerateStream_ToolArgumentsAcrossChunks(t *testing.T) {
 	}
 }
 
-func TestChatModel_GenerateStream_RefusalDeltas(t *testing.T) {
+func TestModel_GenerateStream_RefusalDeltas(t *testing.T) {
 	rig := newChatRig(t, chatSSE(
 		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","refusal":"I cannot "}}]}`,
 		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"refusal":"help"}}]}`,
@@ -280,18 +229,18 @@ func TestChatModel_GenerateStream_RefusalDeltas(t *testing.T) {
 	}
 }
 
-func TestChatModel_GenerateStream_EmptyStream(t *testing.T) {
+func TestModel_GenerateStream_EmptyStream(t *testing.T) {
 	rig := newChatRig(t, chatSSE())
 	_, err := askChat(t, rig.model(t), true)
-	if !errors.Is(err, ErrNoChoices) {
-		t.Fatalf("err = %v, want %v", err, ErrNoChoices)
+	if !errors.Is(err, openaicommon.ErrNoChoices) {
+		t.Fatalf("err = %v, want %v", err, openaicommon.ErrNoChoices)
 	}
 }
 
-// TestChatModel_GenerateStream_UsageIsTheLatestReport covers a provider that
+// TestModel_GenerateStream_UsageIsTheLatestReport covers a provider that
 // resends the running usage on every chunk. Summing those reports would count
 // the prompt once per chunk.
-func TestChatModel_GenerateStream_UsageIsTheLatestReport(t *testing.T) {
+func TestModel_GenerateStream_UsageIsTheLatestReport(t *testing.T) {
 	rig := newChatRig(t, chatSSE(
 		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"hail "}}],"usage":{"prompt_tokens":8,"completion_tokens":1,"total_tokens":9}}`,
 		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"at -7 C"}}],"usage":{"prompt_tokens":8,"completion_tokens":3,"total_tokens":11}}`,
@@ -307,12 +256,12 @@ func TestChatModel_GenerateStream_UsageIsTheLatestReport(t *testing.T) {
 	}
 }
 
-// TestChatModel_NoUsageReportedLeavesUsageUnset covers a provider that reports
+// TestModel_NoUsageReportedLeavesUsageUnset covers a provider that reports
 // no usage, as one ignoring stream_options.include_usage does. Zeros would
 // report a turn that did real work as having cost nothing. The streamed
 // tool-call turn matters most: its final response is rebuilt from the
 // snapshot, whose usage is zero.
-func TestChatModel_NoUsageReportedLeavesUsageUnset(t *testing.T) {
+func TestModel_NoUsageReportedLeavesUsageUnset(t *testing.T) {
 	for name, frames := range map[string][]string{
 		"text": {
 			`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"sunny"}}]}`,
@@ -347,26 +296,26 @@ func TestChatModel_NoUsageReportedLeavesUsageUnset(t *testing.T) {
 	})
 }
 
-// TestChatModel_GenerateStream_UnparseableCallFailsAsBlocking pins that a turn
+// TestModel_GenerateStream_UnparseableCallFailsAsBlocking pins that a turn
 // whose streamed text survived still fails when its tool call cannot be read,
 // because only the snapshot states the calls and blocking rejects the same
 // body.
-func TestChatModel_GenerateStream_UnparseableCallFailsAsBlocking(t *testing.T) {
+func TestModel_GenerateStream_UnparseableCallFailsAsBlocking(t *testing.T) {
 	rig := newChatRig(t, chatSSE(
 		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"looking"}}]}`,
 		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":"}}]}}]}`,
 		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
 	))
 	_, err := askChat(t, rig.model(t), true)
-	if !errors.Is(err, ErrFunctionCallArgs) {
-		t.Fatalf("err = %v, want %v", err, ErrFunctionCallArgs)
+	if !errors.Is(err, openaicommon.ErrFunctionCallArgs) {
+		t.Fatalf("err = %v, want %v", err, openaicommon.ErrFunctionCallArgs)
 	}
 }
 
-// TestChatModel_GenerateStream_EmptySnapshotKeepsStreamedText covers a delta
+// TestModel_GenerateStream_EmptySnapshotKeepsStreamedText covers a delta
 // the accumulator refuses, here for a choice index past its bound, while the
 // text it carried still reached the caller as a partial.
-func TestChatModel_GenerateStream_EmptySnapshotKeepsStreamedText(t *testing.T) {
+func TestModel_GenerateStream_EmptySnapshotKeepsStreamedText(t *testing.T) {
 	rig := newChatRig(t, chatSSE(
 		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":500,"delta":{"role":"assistant","content":"sunny"}}]}`,
 	))
@@ -384,132 +333,7 @@ func TestChatModel_GenerateStream_EmptySnapshotKeepsStreamedText(t *testing.T) {
 	}
 }
 
-// TestChatModel_GenerateStream_ChunkIDsDiffer covers a provider that gives each
-// chunk of one stream its own id. The accumulator refuses a chunk whose id is
-// not the first one's, which would lose the call's arguments, or the call.
-func TestChatModel_GenerateStream_ChunkIDsDiffer(t *testing.T) {
-	for _, tt := range []struct {
-		name     string
-		frames   []string
-		wantText string
-		wantID   string
-	}{
-		{
-			name: "arguments under changing ids",
-			frames: []string{
-				`{"id":"a1","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":""}}]}}]}`,
-				`{"id":"a2","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"city\":"}}]}}]}`,
-				`{"id":"a3","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"Paris\"}"}}]}}]}`,
-				`{"id":"a4","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
-			},
-			wantID: "a1",
-		},
-		{
-			// Opens with a chunk that has no id, so the id to keep is the first
-			// non-empty one rather than the first one.
-			name: "text then a call under a new id",
-			frames: []string{
-				`{"id":"","object":"chat.completion.chunk","model":"m","choices":[]}`,
-				`{"id":"a1","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"looking"}}]}`,
-				`{"id":"a2","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Paris\"}"}}]}}]}`,
-				`{"id":"a3","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
-			},
-			wantText: "looking",
-			wantID:   "a1",
-		},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			rig := newChatRig(t, chatSSE(tt.frames...))
-			got, err := askChat(t, rig.model(t), true)
-			if err != nil {
-				t.Fatalf("GenerateContent() err = %v", err)
-			}
-			final := got[len(got)-1]
-			if text := responseText(final); text != tt.wantText {
-				t.Errorf("final text = %q, want %q", text, tt.wantText)
-			}
-			if id := final.CustomMetadata["openai_response_id"]; id != tt.wantID {
-				t.Errorf("response id = %v, want %q from the first non-empty chunk id", id, tt.wantID)
-			}
-			call := onlyCall(t, final)
-			if call.ID != "call_1" || call.Args["city"] != "Paris" {
-				t.Errorf("call = %#v, want call_1 with city Paris", call)
-			}
-			if final.FinishReason != genai.FinishReasonStop {
-				t.Errorf("finish reason = %v, want STOP", final.FinishReason)
-			}
-		})
-	}
-}
-
-// TestChatModel_GenerateStream_RejectedToolCallChunkFails pins that a tool-call
-// delta the accumulator refuses fails the turn, since only the snapshot states
-// the calls and dropping one would pass the turn off as whole.
-func TestChatModel_GenerateStream_RejectedToolCallChunkFails(t *testing.T) {
-	rig := newChatRig(t, chatSSE(
-		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"looking"}}]}`,
-		// A tool-call index this far ahead grows the choice past the bound the
-		// accumulator allows in one step.
-		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":1000,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{}"}}]}}]}`,
-		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
-	))
-	got, err := askChat(t, rig.model(t), true)
-	if !errors.Is(err, errToolCallChunkRejected) {
-		t.Fatalf("err = %v, want %v", err, errToolCallChunkRejected)
-	}
-	for _, resp := range got {
-		if resp.TurnComplete {
-			t.Errorf("a response closed the turn without its call: %#v", resp.Content)
-		}
-	}
-}
-
-// TestChatModel_GenerateStream_UnsupersededSnapshotKeepsCalls covers a snapshot
-// whose text cannot replace the streamed text, because the refusal and content
-// deltas interleaved. The streamed text stands, but the calls exist only in the
-// snapshot, so they must still reach the final response.
-func TestChatModel_GenerateStream_UnsupersededSnapshotKeepsCalls(t *testing.T) {
-	rig := newChatRig(t, chatSSE(
-		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","refusal":"no"}}]}`,
-		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"x"}}]}`,
-		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Lisbon\"}"}}]}}]}`,
-		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
-	))
-	got, err := askChat(t, rig.model(t), true)
-	if err != nil {
-		t.Fatalf("GenerateContent() err = %v", err)
-	}
-	final := got[len(got)-1]
-	if text := responseText(final); text != "nox" {
-		t.Errorf("final text = %q, want the streamed text", text)
-	}
-	if call := onlyCall(t, final); call.ID != "call_1" || call.Args["city"] != "Lisbon" {
-		t.Errorf("call = %#v, want call_1 with city Lisbon", call)
-	}
-}
-
-// TestChatModel_GenerateStream_SparseToolIndex covers a stream whose first
-// tool-call delta uses index 1. The accumulator pads index 0 with an empty
-// entry, which must not reach the caller as a call with no name.
-func TestChatModel_GenerateStream_SparseToolIndex(t *testing.T) {
-	rig := newChatRig(t, chatSSE(
-		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":1,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Lisbon\"}"}}]}}]}`,
-		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
-	))
-	got, err := askChat(t, rig.model(t), true)
-	if err != nil {
-		t.Fatalf("GenerateContent() err = %v", err)
-	}
-	final := got[len(got)-1]
-	if n := len(final.Content.Parts); n != 1 {
-		t.Fatalf("parts = %d, want only the get_weather call", n)
-	}
-	if call := onlyCall(t, final); call.ID != "call_1" || call.Name != "get_weather" {
-		t.Errorf("call = %#v, want call_1 to get_weather", call)
-	}
-}
-
-func TestChatModel_GenerateStream_ErrorMidStream(t *testing.T) {
+func TestModel_GenerateStream_ErrorMidStream(t *testing.T) {
 	rig := newChatRig(t, chatSSE(
 		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"hail "}}]}`,
 		`{"error":{"message":"overloaded","type":"server_error"}}`,
@@ -528,10 +352,10 @@ func TestChatModel_GenerateStream_ErrorMidStream(t *testing.T) {
 	}
 }
 
-// TestChatModel_GenerateStream_EarlyBreakClosesTheStream pins that a consumer
+// TestModel_GenerateStream_EarlyBreakClosesTheStream pins that a consumer
 // leaving the range releases the connection rather than leaving the provider
 // streaming into a reader that is gone.
-func TestChatModel_GenerateStream_EarlyBreakClosesTheStream(t *testing.T) {
+func TestModel_GenerateStream_EarlyBreakClosesTheStream(t *testing.T) {
 	released := make(chan struct{})
 	rig := newChatRig(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -555,7 +379,7 @@ func TestChatModel_GenerateStream_EarlyBreakClosesTheStream(t *testing.T) {
 	}
 }
 
-func TestChatModel_GenerateStream_HonoursTimeout(t *testing.T) {
+func TestModel_GenerateStream_HonoursTimeout(t *testing.T) {
 	rig := newChatRig(t, func(w http.ResponseWriter, r *http.Request) {
 		<-r.Context().Done()
 	})
@@ -575,9 +399,9 @@ func TestChatModel_GenerateStream_HonoursTimeout(t *testing.T) {
 	}
 }
 
-// TestChatModel_GenerateStream_MatchesBlocking is the guard that keeps the two
+// TestModel_GenerateStream_MatchesBlocking is the guard that keeps the two
 // paths from drifting: the same turn must read the same whether it streamed.
-func TestChatModel_GenerateStream_MatchesBlocking(t *testing.T) {
+func TestModel_GenerateStream_MatchesBlocking(t *testing.T) {
 	blockingRig := newChatRig(t, chatJSON(`{"id":"c","model":"m",
 		"choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","content":"looking",
 		"tool_calls":[{"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Lisbon\"}"}}]}}],
@@ -618,7 +442,7 @@ func TestChatModel_GenerateStream_MatchesBlocking(t *testing.T) {
 	}
 }
 
-func TestChatModel_HonoursTimeout(t *testing.T) {
+func TestModel_HonoursTimeout(t *testing.T) {
 	rig := newChatRig(t, func(w http.ResponseWriter, r *http.Request) {
 		<-r.Context().Done()
 	})
@@ -635,45 +459,6 @@ func TestChatModel_HonoursTimeout(t *testing.T) {
 	}
 	if !errors.Is(gotErr, context.DeadlineExceeded) {
 		t.Fatalf("err = %v, want a deadline error", gotErr)
-	}
-}
-
-// TestChatModel_HTTPOptionsHeadersNeverReachTheWire holds this endpoint to the
-// promise the Responses path keeps: a header a caller put in HTTPOptions, which
-// may be a Gemini credential, never reaches the provider or displaces the
-// configured key.
-func TestChatModel_HTTPOptionsHeadersNeverReachTheWire(t *testing.T) {
-	for _, stream := range []bool{false, true} {
-		t.Run(fmt.Sprintf("stream=%v", stream), func(t *testing.T) {
-			var got http.Header
-			rig := newChatRig(t, func(w http.ResponseWriter, r *http.Request) {
-				got = r.Header.Clone()
-				chatJSON(`{"id":"c","model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"hi"}}]}`)(w, r)
-			})
-			timeout := 30 * time.Second
-			req := &model.LLMRequest{
-				Contents: []*genai.Content{genai.NewContentFromText("hi", genai.RoleUser)},
-				Config: &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{
-					Timeout: &timeout,
-					Headers: http.Header{
-						"Authorization":  []string{"Bearer caller"},
-						"X-Goog-Api-Key": []string{"gemini-key"},
-						"X-Trace-Id":     []string{"harmless"},
-					},
-				}},
-			}
-			for range rig.model(t).GenerateContent(t.Context(), req, stream) {
-			}
-			if v := got.Get("Authorization"); v != "Bearer test" {
-				t.Errorf("Authorization = %s, want the configured key: a caller header displaced it", redact(v))
-			}
-			if v := got.Get("X-Goog-Api-Key"); v != "" {
-				t.Errorf("X-Goog-Api-Key = %s, want absent: a Gemini credential reached the provider", redact(v))
-			}
-			if v := got.Get("X-Trace-Id"); v != "" {
-				t.Errorf("X-Trace-Id = %s, want absent: headers are not forwarded", redact(v))
-			}
-		})
 	}
 }
 
@@ -699,4 +484,30 @@ func responseText(resp *model.LLMResponse) string {
 		}
 	}
 	return b.String()
+}
+
+// newLocalhostServer starts an httptest.Server bound to IPv4 loopback, since
+// some sandboxes forbid IPv6 listeners.
+func newLocalhostServer(t *testing.T, handler http.Handler) *httptest.Server {
+	t.Helper()
+	server := httptest.NewUnstartedServer(handler)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen on IPv4 loopback: %v", err)
+	}
+	server.Listener = ln
+	server.Start()
+	return server
+}
+
+// newCompletionsModel builds a model pointed at the test server, the way the
+// parent package's NewModel does for APIChatCompletions.
+func newCompletionsModel(t *testing.T, server *httptest.Server) model.LLM {
+	t.Helper()
+	client := openai.NewClient(
+		option.WithAPIKey("test"),
+		option.WithBaseURL(server.URL+"/v1"),
+		option.WithHTTPClient(server.Client()),
+	)
+	return New(&client, "gpt-4o-mini")
 }

@@ -12,10 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package openaimodel
+package completions
 
 import (
-	"reflect"
 	"strings"
 	"testing"
 
@@ -40,9 +39,9 @@ var weatherTool = &genai.Tool{FunctionDeclarations: []*genai.FunctionDeclaration
 	},
 }}}
 
-// TestConvertChatTools_NestedFunctionShape pins the extra "function" level Chat
+// TestConvertTools_NestedFunctionShape pins the extra "function" level Chat
 // Completions requires and the flat Responses shape does not have.
-func TestConvertChatTools_NestedFunctionShape(t *testing.T) {
+func TestConvertTools_NestedFunctionShape(t *testing.T) {
 	wire := chatWire(t, toolReq(&genai.GenerateContentConfig{Tools: []*genai.Tool{weatherTool}}))
 	tools, ok := wire["tools"].([]any)
 	if !ok || len(tools) != 1 {
@@ -69,7 +68,7 @@ func TestConvertChatTools_NestedFunctionShape(t *testing.T) {
 	}
 }
 
-func TestConvertChatTools_NoParametersDefaultsToEmptyObject(t *testing.T) {
+func TestConvertTools_NoParametersDefaultsToEmptyObject(t *testing.T) {
 	wire := chatWire(t, toolReq(&genai.GenerateContentConfig{Tools: []*genai.Tool{{
 		FunctionDeclarations: []*genai.FunctionDeclaration{{Name: "ping"}},
 	}}}))
@@ -80,40 +79,8 @@ func TestConvertChatTools_NoParametersDefaultsToEmptyObject(t *testing.T) {
 	}
 }
 
-// TestConvertChatTools_ParametersJsonSchema covers the schema functiontool.New
-// emits, whose optional properties must stay optional: the strict rewrite that
-// response schemas get would list every property as required.
-func TestConvertChatTools_ParametersJsonSchema(t *testing.T) {
-	wire := chatWire(t, toolReq(&genai.GenerateContentConfig{Tools: []*genai.Tool{{
-		FunctionDeclarations: []*genai.FunctionDeclaration{{
-			Name: "get_weather",
-			ParametersJsonSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"city":  map[string]any{"type": "string"},
-					"units": map[string]any{"type": "string"},
-				},
-				"required":             []any{"city"},
-				"additionalProperties": false,
-			},
-		}},
-	}}}))
-	fn := wire["tools"].([]any)[0].(map[string]any)["function"].(map[string]any)
-	params := fn["parameters"].(map[string]any)
-	props, _ := params["properties"].(map[string]any)
-	if _, ok := props["units"]; !ok || len(props) != 2 {
-		t.Errorf("properties = %#v, want city and units", params["properties"])
-	}
-	if got := params["required"]; !reflect.DeepEqual(got, []any{"city"}) {
-		t.Errorf("required = %v, want only city", got)
-	}
-	if got := params["additionalProperties"]; got != false {
-		t.Errorf("additionalProperties = %v, want false", got)
-	}
-}
-
-func TestConvertChatTools_RejectsNonFunctionTools(t *testing.T) {
-	_, err := buildChatParams("m", toolReq(&genai.GenerateContentConfig{
+func TestConvertTools_RejectsNonFunctionTools(t *testing.T) {
+	_, err := buildParams("m", toolReq(&genai.GenerateContentConfig{
 		Tools: []*genai.Tool{{GoogleSearch: &genai.GoogleSearch{}}},
 	}))
 	if err == nil || !strings.Contains(err.Error(), "non-function tools") {
@@ -121,7 +88,7 @@ func TestConvertChatTools_RejectsNonFunctionTools(t *testing.T) {
 	}
 }
 
-func TestConvertChatToolChoice_Modes(t *testing.T) {
+func TestConvertToolChoice_Modes(t *testing.T) {
 	tests := []struct {
 		name   string
 		mode   genai.FunctionCallingConfigMode
@@ -152,8 +119,8 @@ func TestConvertChatToolChoice_Modes(t *testing.T) {
 	}
 }
 
-func TestConvertChatToolChoice_UnsupportedMode(t *testing.T) {
-	_, err := buildChatParams("m", toolReq(&genai.GenerateContentConfig{
+func TestConvertToolChoice_UnsupportedMode(t *testing.T) {
+	_, err := buildParams("m", toolReq(&genai.GenerateContentConfig{
 		Tools:      []*genai.Tool{weatherTool},
 		ToolConfig: &genai.ToolConfig{FunctionCallingConfig: &genai.FunctionCallingConfig{Mode: "TELEPATHY"}},
 	}))
@@ -162,9 +129,9 @@ func TestConvertChatToolChoice_UnsupportedMode(t *testing.T) {
 	}
 }
 
-// TestConvertChatToolChoice_AllowedTools pins the nesting again: an allowed
+// TestConvertToolChoice_AllowedTools pins the nesting again: an allowed
 // tool names its function one level deeper than the Responses form.
-func TestConvertChatToolChoice_AllowedTools(t *testing.T) {
+func TestConvertToolChoice_AllowedTools(t *testing.T) {
 	for _, tt := range []struct {
 		name     string
 		mode     genai.FunctionCallingConfigMode
@@ -207,10 +174,10 @@ func TestConvertChatToolChoice_AllowedTools(t *testing.T) {
 	}
 }
 
-// TestConvertChatToolChoice_AnyWithOneNameNamesTheFunction pins the older
+// TestConvertToolChoice_AnyWithOneNameNamesTheFunction pins the older
 // named-function form for the one case it can express, which compatible
 // providers accept where many reject allowed_tools.
-func TestConvertChatToolChoice_AnyWithOneNameNamesTheFunction(t *testing.T) {
+func TestConvertToolChoice_AnyWithOneNameNamesTheFunction(t *testing.T) {
 	wire := chatWire(t, toolReq(&genai.GenerateContentConfig{
 		Tools: []*genai.Tool{weatherTool},
 		ToolConfig: &genai.ToolConfig{FunctionCallingConfig: &genai.FunctionCallingConfig{
@@ -230,10 +197,10 @@ func TestConvertChatToolChoice_AnyWithOneNameNamesTheFunction(t *testing.T) {
 	}
 }
 
-// TestBuildChatParams_ToolChoiceNeedsTools pins that tool_choice travels only
+// TestBuildParams_ToolChoiceNeedsTools pins that tool_choice travels only
 // with tools: the API rejects one sent without them, "none" included, which a
 // turn whose toolset came up empty would otherwise hit.
-func TestBuildChatParams_ToolChoiceNeedsTools(t *testing.T) {
+func TestBuildParams_ToolChoiceNeedsTools(t *testing.T) {
 	for _, mode := range []genai.FunctionCallingConfigMode{
 		genai.FunctionCallingConfigModeNone,
 		genai.FunctionCallingConfigModeAny,
@@ -249,7 +216,7 @@ func TestBuildChatParams_ToolChoiceNeedsTools(t *testing.T) {
 	}
 }
 
-func TestConvertChatToolChoice_AllBlankNamesFallsBack(t *testing.T) {
+func TestConvertToolChoice_AllBlankNamesFallsBack(t *testing.T) {
 	wire := chatWire(t, toolReq(&genai.GenerateContentConfig{
 		Tools: []*genai.Tool{weatherTool},
 		ToolConfig: &genai.ToolConfig{FunctionCallingConfig: &genai.FunctionCallingConfig{
