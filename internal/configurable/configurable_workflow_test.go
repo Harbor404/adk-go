@@ -595,15 +595,20 @@ edges:
 func routeHandler(ctx agent.Context, input string) (string, error) { return input, nil }
 
 func init() {
-	for i := 1; i <= 9; i++ {
+	for i := 1; i <= 12; i++ {
 		RegisterNodeFunction(fmt.Sprintf("h%d", i), routeHandler)
 	}
 }
 
 func TestParseEdges_RouteOrderIsDeterministic(t *testing.T) {
-	// Enough routes to push the map past Go's single-bucket layout, where
-	// iteration is only a random rotation and would match sorted order by luck
-	// too often. Declared unsorted so the test can tell the two apart.
+	// Twelve routes exceed the eight slots a Go map keeps in one group, so
+	// iteration is no longer merely a rotation of insertion order and a bare
+	// range cannot match sorted order by luck. Declared unsorted.
+	//
+	// Three key choices pin which order, not just that there is one:
+	// "10" before "2" separates byte order from numeric, "zulu" after
+	// "default" separates it from an implementation that pins the default
+	// route last, and the mixed cases separate it from case-folded order.
 	const config = `
 edges:
   - - START
@@ -617,6 +622,9 @@ edges:
       CHARLIE: h7
       TANGO: h8
       default: h9
+      "2": h10
+      zulu: h11
+      "10": h12
 `
 	var cfg struct {
 		Edges []yaml.Node `yaml:"edges"`
@@ -636,6 +644,8 @@ edges:
 	}
 	want := []string{
 		"START->upper_fn(none)",
+		"upper_fn->h12(10)",
+		"upper_fn->h10(2)",
 		"upper_fn->h2(ALPHA)",
 		"upper_fn->h5(BRAVO)",
 		"upper_fn->h7(CHARLIE)",
@@ -645,6 +655,7 @@ edges:
 		"upper_fn->h6(YANKEE)",
 		"upper_fn->h1(ZETA)",
 		"upper_fn->h9(<default>)",
+		"upper_fn->h11(zulu)",
 	}
 	if !slices.Equal(got, want) {
 		t.Errorf("parseEdges() =\n\t%v\nwant\n\t%v", got, want)
@@ -652,8 +663,9 @@ edges:
 }
 
 func routeLabel(r workflow.Route) string {
-	// Checked before the type switch so it cannot be confused with the literal
-	// StringRoute("default").
+	// Checked first because the type switch below has no arm for the
+	// unexported type behind workflow.Default, so a Default route reaching it
+	// would be labelled with its Go type instead.
 	if r == workflow.Default {
 		return "<default>"
 	}

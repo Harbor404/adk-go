@@ -167,6 +167,9 @@ func parseEdges(ctx context.Context, parentPath string, nodes []yaml.Node) ([]wo
 			for _, routeMap := range routeMaps {
 				// Edge order is observable at runtime: it drives successor
 				// dispatch order and the pending queue under max concurrency.
+				// Sorted within each route map. A chain declaring several
+				// route maps keeps them in document order, which is already
+				// deterministic.
 				for _, routeVal := range slices.Sorted(maps.Keys(routeMap)) {
 					targetRef := routeMap[routeVal]
 					targetNode, err := resolveNodeLike(ctx, parentPath, targetRef)

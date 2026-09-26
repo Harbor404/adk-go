@@ -36,8 +36,9 @@ func (b *EdgeBuilder) Add(from, to Node) *EdgeBuilder {
 }
 
 // AddRoute adds a new edge with a route condition between two nodes.
-// route may be [StringRoute], [IntRoute], [BoolRoute], [MultiRoute], or
-// [Default] — the edge taken when no concrete route matched.
+// route may be any [Route], such as [StringRoute], [IntRoute], [BoolRoute],
+// [MultiRoute], or [Default] — the edge taken when no concrete route matched.
+// A nil route makes the edge unconditional.
 func (b *EdgeBuilder) AddRoute(from, to Node, route Route) *EdgeBuilder {
 	b.edges = append(b.edges, Edge{From: from, To: to, Route: route})
 	return b
