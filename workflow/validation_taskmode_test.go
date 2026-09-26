@@ -15,6 +15,7 @@
 package workflow_test
 
 import (
+	"strings"
 	"testing"
 
 	"google.golang.org/adk/v2/agent"
@@ -208,5 +209,104 @@ func TestValidateChatModeWiring_UndeclaredSubAgentMayFollowANode(t *testing.T) {
 		{From: first, To: second},
 	}); err != nil {
 		t.Errorf("an undeclared sub-agent resolves single_turn at a node and may follow one; got %v", err)
+	}
+}
+
+// Both mode checks collect their findings rather than returning the
+// first, so a graph with two misplaced agents names both of them.
+func TestModeChecks_ReportEveryViolation(t *testing.T) {
+	t.Parallel()
+
+	newNode := func(t *testing.T, name string, mode llmagent.Mode) workflow.Node {
+		t.Helper()
+		a, err := llmagent.New(llmagent.Config{Name: name, Mode: mode})
+		if err != nil {
+			t.Fatalf("llmagent.New(%q, %q): %v", name, mode, err)
+		}
+		n, err := workflow.NewAgentNode(a, workflow.NodeConfig{})
+		if err != nil {
+			t.Fatalf("workflow.NewAgentNode(%q): %v", name, err)
+		}
+		return n
+	}
+
+	tests := []struct {
+		name  string
+		edges func(t *testing.T) []workflow.Edge
+		want  []string
+	}{
+		{
+			name: "two task-mode graph nodes",
+			edges: func(t *testing.T) []workflow.Edge {
+				first, second := newNode(t, "doer1", llmagent.ModeTask), newNode(t, "doer2", llmagent.ModeTask)
+				return []workflow.Edge{{From: workflow.Start, To: first}, {From: first, To: second}}
+			},
+			want: []string{`Agent "doer1" has mode='task'`, `Agent "doer2" has mode='task'`},
+		},
+		{
+			name: "two chat-mode agents fed from a predecessor",
+			edges: func(t *testing.T) []workflow.Edge {
+				head := newNode(t, "head", llmagent.ModeSingleTurn)
+				c1, c2 := newNode(t, "chat1", llmagent.ModeChat), newNode(t, "chat2", llmagent.ModeChat)
+				return []workflow.Edge{
+					{From: workflow.Start, To: head},
+					{From: head, To: c1},
+					{From: head, To: c2},
+				}
+			},
+			want: []string{`Agent "chat1" has mode='chat'`, `Agent "chat2" has mode='chat'`},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := workflow.New("wf", tc.edges(t))
+			if err == nil {
+				t.Fatal("New() = nil, want an error naming both agents")
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("New() error = %q, want it to mention %s", err, want)
+				}
+			}
+		})
+	}
+}
+
+// Two sub-workflows can collide with the same parent, so the collision
+// message has to name its node. Without that the two findings render
+// identically and the dedup in joinViolations keeps one, naming
+// neither. WorkflowNode embeds an exported BaseNode and takes no
+// NodeConfig, so reassigning it is the only way to configure one, and
+// it renames the node.
+func TestValidateSubWorkflowNames_TwoCollisions(t *testing.T) {
+	t.Parallel()
+
+	newColliding := func(t *testing.T, nodeName string) *workflow.WorkflowNode {
+		t.Helper()
+		leaf := workflow.NewFunctionNode("leaf", func(ctx agent.Context, in string) (string, error) {
+			return in, nil
+		}, workflow.NodeConfig{})
+		n, err := workflow.NewWorkflowNode("outer", []workflow.Edge{{From: workflow.Start, To: leaf}})
+		if err != nil {
+			t.Fatalf("NewWorkflowNode: %v", err)
+		}
+		n.BaseNode = workflow.NewBaseNode(nodeName, "", workflow.NodeConfig{})
+		return n
+	}
+
+	n1, n2 := newColliding(t, "n1"), newColliding(t, "n2")
+	_, err := workflow.New("outer", []workflow.Edge{
+		{From: workflow.Start, To: n1},
+		{From: n1, To: n2},
+	})
+	if err == nil {
+		t.Fatal("New() = nil, want a collision naming both nodes")
+	}
+	for _, want := range []string{`(node "n1")`, `(node "n2")`} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("New() error = %q, want it to mention %s", err, want)
+		}
 	}
 }
