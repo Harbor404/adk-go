@@ -152,12 +152,12 @@ const defaultInitTimeout = 30 * time.Second
 // Wiring this up also means trusting the embedding server: ADK does not
 // authenticate session.UserID, and it now decides whose credential is minted.
 //
-// Nothing is cached. Every call reaches the credential service, and
-// [auth.Transport] calls Credential once per outbound request, so a tool that
-// makes n requests costs n retrievals plus any pending poll they incur. That is
-// deliberate for this change rather than an oversight — a cache is the whole of
-// the follow-up, and it is where cross-user leaks live, so it wants its own
-// review of what the key must cover.
+// Resolved credentials are cached in [ProviderConfig.Store], under the key
+// described there, until the service's expiry or an hour, whichever comes
+// first. Only a miss reaches the credential service, at the cost of a retrieval
+// plus any pending poll. A credential revoked before it expires therefore keeps
+// being served until its entry does, unless the entry is deleted through
+// [Client.CacheKey].
 //
 // ctx is used only to build the default client, and only for its values. Its
 // cancellation is not honored, because that client outlives any one request.

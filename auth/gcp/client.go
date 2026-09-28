@@ -394,6 +394,10 @@ type Retrieval struct {
 // Wrapped with %w throughout, so [ErrConsentRejected], [ErrPollTimeout] and
 // [auth.ConsentRequiredError] stay matchable.
 //
+// It returns a [*Retrieval] where v2.3.0 and v2.4.0 returned the
+// [auth.Credential] alone, so a caller written against either release stops
+// compiling and reads [Retrieval.Credential] instead.
+//
 // Matchable with [errors.Is] and [errors.As], and only with those. Naming the
 // resource wraps every error past validation, so a direct == against any of those
 // sentinels, or a bare type assertion to [*APIError], stops being true where it
