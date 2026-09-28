@@ -16,9 +16,9 @@ package remoteagent
 
 import (
 	"context"
+	"net/http"
 	"net/url"
 
-	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2aclient"
 )
 
@@ -45,19 +45,24 @@ func CredentialScope(appName, userID, sessionID, agentName string) a2aclient.Ses
 		"/" + url.QueryEscape(sessionID) + "/" + url.QueryEscape(agentName))
 }
 
-type agentCardKey struct{}
+type cardFetchClientKey struct{}
 
-// WithAgentCard carries the resolved card so the credentials adapter can tell
-// which kind of security scheme a name refers to. The a2a CredentialsService
-// interface hands it only the name.
-func WithAgentCard(ctx context.Context, card *a2a.AgentCard) context.Context {
-	return context.WithValue(ctx, agentCardKey{}, card)
+// WithCardFetchClient carries the HTTP client that applies the remote agent's
+// credential, so an agent card provider built by remoteagent.NewAgentCardProvider
+// can authenticate the card fetch as adk-python does. It is a context value
+// rather than a provider option because the provider is built before, and
+// independently of, the agent that will call it.
+func WithCardFetchClient(ctx context.Context, client *http.Client) context.Context {
+	if client == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, cardFetchClientKey{}, client)
 }
 
-// AgentCardFrom returns the card [WithAgentCard] attached, or nil.
-func AgentCardFrom(ctx context.Context) *a2a.AgentCard {
-	card, _ := ctx.Value(agentCardKey{}).(*a2a.AgentCard)
-	return card
+// CardFetchClientFrom returns the client [WithCardFetchClient] attached, or nil.
+func CardFetchClientFrom(ctx context.Context) *http.Client {
+	client, _ := ctx.Value(cardFetchClientKey{}).(*http.Client)
+	return client
 }
 
 // CallIdentity is who is calling whom, for one outgoing A2A call.
@@ -69,48 +74,17 @@ type CallIdentity struct {
 	AgentName string
 }
 
-// AttachAuthScope returns ctx carrying what the a2a auth interceptor needs to
-// resolve a credential for one outgoing call: the scope, and the card that
-// decides where the credential is written. Pass a nil card when it is not
-// resolved yet and add it later with [WithAgentCard].
+// AttachAuthScope returns ctx carrying what the auth transport needs to
+// resolve a credential for one outgoing call: the scope, and the client that
+// authenticates a card fetch.
 //
-// It is a no-op unless cfg.OwnsAuthScope says this SDK put the interceptor
-// there. A caller who wired their own interceptor owns their own key, and
-// overwriting it would silently drop their credential.
-func AttachAuthScope(ctx context.Context, cfg *A2AServerConfig, id CallIdentity, card *a2a.AgentCard) context.Context {
+// It is a no-op unless cfg.OwnsAuthScope says this SDK put the transport
+// there. A caller who wired their own auth owns their own key, and overwriting
+// it would silently drop their credential.
+func AttachAuthScope(ctx context.Context, cfg *A2AServerConfig, id CallIdentity) context.Context {
 	if !cfg.OwnsAuthScope {
 		return ctx
 	}
 	ctx = a2aclient.AttachSessionID(ctx, CredentialScope(id.AppName, id.UserID, id.SessionID, id.AgentName))
-	return WithAgentCard(ctx, card)
-}
-
-// CardNamesNoScheme reports whether the card gives the a2a AuthInterceptor
-// nothing to ask about, so it never calls Get and the request leaves with no
-// credential and nothing logged.
-//
-// It has to agree with the interceptor exactly, because the two warnings are
-// meant to be mutually exclusive. The interceptor bails on a nil requirement
-// list or a nil scheme map, then iterates the requirement objects and the
-// scheme names inside each. A nil requirement list needs no test of its own
-// here — the loop below reaches the same answer by iterating nothing — so what
-// is left is the nil scheme map and a requirement object naming nothing. The
-// latter is the one a real card carries: security: [{}] is how OpenAPI spells
-// "authentication optional".
-//
-// Nil rather than empty is deliberate and is the interceptor's own test. A card
-// whose JSON says "securitySchemes": {} decodes to an empty but non-nil map, so
-// the interceptor does ask, finds nothing that can carry the credential, and
-// the mismatch warning covers it. Reading that case as "names no scheme" here
-// would warn about it twice.
-func CardNamesNoScheme(card *a2a.AgentCard) bool {
-	if card == nil || card.SecuritySchemes == nil {
-		return true
-	}
-	for _, requirement := range card.SecurityRequirements {
-		if len(requirement) > 0 {
-			return false
-		}
-	}
-	return true
+	return WithCardFetchClient(ctx, cfg.CardFetchClient)
 }

@@ -49,193 +49,13 @@ import (
 )
 
 // errResolve is the provider failure asserted on with errors.Is, so the %w
-// wrapping in credentialsService.Get stays load-bearing.
+// wrapping in the auth transport stays load-bearing.
 var errResolve = errors.New("resolve failed")
 
 // tokenSourceFunc adapts a function to an [oauth2.TokenSource].
 type tokenSourceFunc func() (*oauth2.Token, error)
 
 func (f tokenSourceFunc) Token() (*oauth2.Token, error) { return f() }
-
-// anyPlacementCard declares one scheme of each placement the adapter supports,
-// so a table row can pick the one its credential belongs in.
-var anyPlacementCard = newSecureCard("http://example.invalid",
-	a2a.NamedSecuritySchemes{
-		"apikey": a2a.APIKeySecurityScheme{Location: a2a.APIKeySecuritySchemeLocationHeader, Name: "X-Api-Key"},
-		"bearer": a2a.HTTPAuthSecurityScheme{Scheme: "Bearer"},
-	},
-	nil,
-)
-
-func schemeFor(apiKey bool) a2a.SecuritySchemeName {
-	if apiKey {
-		return "apikey"
-	}
-	return "bearer"
-}
-
-func TestCredentialsServiceGet(t *testing.T) {
-	tests := []struct {
-		name string
-		// provider is the credential source under test.
-		provider auth.CredentialProvider
-		// apiKeyScheme picks the card scheme to resolve against; API-key
-		// credentials only match the card's apiKey scheme.
-		apiKeyScheme bool
-		want         a2aclient.AuthCredential
-		// wantErrContains pins which branch produced the error; asserting only
-		// err != nil would let every branch collapse into one message.
-		wantErrContains string
-		// wantErrAbsent must not appear in the error, so a secret cannot leak
-		// into a message the interceptor logs.
-		wantErrAbsent string
-	}{
-		{
-			name:     "static bearer token",
-			provider: auth.StaticToken("tok"),
-			want:     "tok",
-		},
-		{
-			name:         "api key value",
-			provider:     auth.APIKey("X-Api-Key", "secret"),
-			apiKeyScheme: true,
-			want:         "secret",
-		},
-		{
-			name:     "oauth2 token source",
-			provider: auth.TokenSourceProvider(oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "at"})),
-			want:     "at",
-		},
-		{
-			name: "pointer to bearer credential",
-			provider: auth.ProviderFunc(func(context.Context) (auth.Credential, error) {
-				return &auth.BearerCredential{Token: "tok"}, nil
-			}),
-			want: "tok",
-		},
-		{
-			name: "pointer to api key credential",
-			provider: auth.ProviderFunc(func(context.Context) (auth.Credential, error) {
-				return &auth.APIKeyCredential{Name: "X-Api-Key", Value: "secret"}, nil
-			}),
-			apiKeyScheme: true,
-			want:         "secret",
-		},
-		{
-			name: "pointer to oauth2 credential",
-			provider: auth.ProviderFunc(func(context.Context) (auth.Credential, error) {
-				return &auth.OAuth2Credential{TokenSource: oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "at"})}, nil
-			}),
-			want: "at",
-		},
-		{
-			name: "typed nil pointer credential",
-			provider: auth.ProviderFunc(func(context.Context) (auth.Credential, error) {
-				return (*auth.BearerCredential)(nil), nil
-			}),
-			wantErrContains: "cannot send *auth.BearerCredential",
-		},
-		{
-			name: "oauth2 missing token source",
-			provider: auth.ProviderFunc(func(context.Context) (auth.Credential, error) {
-				return auth.OAuth2Credential{}, nil
-			}),
-			wantErrContains: "no token source",
-		},
-		{
-			name:            "oauth2 empty access token",
-			provider:        auth.TokenSourceProvider(oauth2.StaticTokenSource(&oauth2.Token{AccessToken: ""})),
-			wantErrContains: "empty access token",
-		},
-		{
-			name: "oauth2 token source error",
-			provider: auth.TokenSourceProvider(tokenSourceFunc(func() (*oauth2.Token, error) {
-				return nil, errors.New("token endpoint refused")
-			})),
-			wantErrContains: "mint oauth2 token",
-		},
-		{
-			name: "oauth2 non-bearer token type",
-			provider: auth.TokenSourceProvider(oauth2.StaticTokenSource(&oauth2.Token{
-				AccessToken: "super-secret", TokenType: "mac",
-			})),
-			wantErrContains: "cannot be sent over a2a",
-			wantErrAbsent:   "super-secret",
-		},
-		{
-			name:            "empty api key value",
-			provider:        auth.APIKey("X-Api-Key", ""),
-			apiKeyScheme:    true,
-			wantErrContains: "empty value",
-		},
-		{
-			name:            "empty bearer token",
-			provider:        auth.StaticToken(""),
-			wantErrContains: "empty token",
-		},
-		{
-			name: "nil credential",
-			provider: auth.ProviderFunc(func(context.Context) (auth.Credential, error) {
-				return nil, nil
-			}),
-			wantErrContains: "nil credential",
-		},
-		{
-			name: "basic credential is untransmittable",
-			provider: auth.ProviderFunc(func(context.Context) (auth.Credential, error) {
-				return auth.BasicCredential{Username: "u", Password: "hunter2"}, nil
-			}),
-			wantErrContains: "cannot send auth.BasicCredential",
-			wantErrAbsent:   "hunter2",
-		},
-		{
-			name: "wrapped credential is untransmittable",
-			provider: auth.ProviderFunc(func(context.Context) (auth.Credential, error) {
-				return auth.WithHeaders(auth.BearerCredential{Token: "tok"}, map[string]string{"x-goog-user-project": "p"}), nil
-			}),
-			wantErrContains: "cannot send",
-		},
-		{
-			name: "provider error",
-			provider: auth.ProviderFunc(func(context.Context) (auth.Credential, error) {
-				return nil, errResolve
-			}),
-			wantErrContains: "resolve auth credential",
-		},
-		{
-			name:            "nil provider",
-			provider:        nil,
-			wantErrContains: "no credential provider",
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			svc := newCredentialsService(tc.provider)
-			// Every row supplies a card naming both placements, so the table
-			// exercises credential handling rather than scheme selection.
-			ctx := iremoteagent.WithAgentCard(t.Context(), anyPlacementCard)
-			got, err := svc.Get(ctx, a2aclient.SessionID("sid"), schemeFor(tc.apiKeyScheme))
-			if tc.wantErrContains != "" {
-				if err == nil {
-					t.Fatalf("Get() = %q, nil error; want error containing %q", got, tc.wantErrContains)
-				}
-				if !strings.Contains(err.Error(), tc.wantErrContains) {
-					t.Errorf("Get() error = %v, want it to contain %q", err, tc.wantErrContains)
-				}
-				if tc.wantErrAbsent != "" && strings.Contains(err.Error(), tc.wantErrAbsent) {
-					t.Errorf("Get() error = %v, want it not to leak %q", err, tc.wantErrAbsent)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("Get() error = %v", err)
-			}
-			if got != tc.want {
-				t.Errorf("Get() = %q, want %q", got, tc.want)
-			}
-		})
-	}
-}
 
 // TestCredentialScope pins the documented key format with literal strings. The
 // end-to-end tests can only show that two identities differ, which every
@@ -288,84 +108,6 @@ func TestCredentialScopeExported(t *testing.T) {
 	ictx := newInvocationContextFor(t, "shop", "alice", "s1")
 	if got, want := CredentialScope(ictx.Session(), "crm"), a2aclient.SessionID("shop/alice/s1/crm"); got != want {
 		t.Errorf("CredentialScope() = %q, want %q", got, want)
-	}
-}
-
-// TestCredentialsServiceGetWrapsProviderError pins that the provider's own
-// error survives the wrap, which is the only way an operator sees why
-// resolution failed.
-func TestCredentialsServiceGetWrapsProviderError(t *testing.T) {
-	svc := newCredentialsService(auth.ProviderFunc(func(context.Context) (auth.Credential, error) {
-		return nil, errResolve
-	}))
-	_, err := svc.Get(iremoteagent.WithAgentCard(t.Context(), anyPlacementCard), "sid", "bearer")
-	if !errors.Is(err, errResolve) {
-		t.Errorf("Get() error = %v, want it to wrap %v", err, errResolve)
-	}
-}
-
-// TestCredentialsServiceGetMatchesScheme covers the card-driven scheme choice:
-// Get hands back a secret only for a scheme that can actually carry it, and
-// reports ErrCredentialNotFound otherwise so the interceptor moves on instead
-// of writing the secret somewhere the remote will not read it.
-func TestCredentialsServiceGetMatchesScheme(t *testing.T) {
-	card := newSecureCard("http://example.invalid",
-		a2a.NamedSecuritySchemes{
-			"apikey":       a2a.APIKeySecurityScheme{Location: a2a.APIKeySecuritySchemeLocationHeader, Name: "X-Api-Key"},
-			"apikey-query": a2a.APIKeySecurityScheme{Location: a2a.APIKeySecuritySchemeLocationQuery, Name: "api_key"},
-			"bearer":       a2a.HTTPAuthSecurityScheme{Scheme: "Bearer"},
-			"basic":        a2a.HTTPAuthSecurityScheme{Scheme: "Basic"},
-			"oauth2":       a2a.OAuth2SecurityScheme{},
-			"mtls":         a2a.MutualTLSSecurityScheme{},
-		},
-		nil,
-	)
-
-	tests := []struct {
-		name     string
-		provider auth.CredentialProvider
-		scheme   string
-		noCard   bool
-		want     a2aclient.AuthCredential
-		wantSkip bool
-	}{
-		// With no card the adapter cannot tell what the scheme name refers to,
-		// so it must not hand over the secret on the strength of the name.
-		{name: "bearer with no card on the context", provider: auth.StaticToken("tok"), scheme: "bearer", noCard: true, wantSkip: true},
-		{name: "api key on apiKey scheme", provider: auth.APIKey("ignored", "secret"), scheme: "apikey", want: "secret"},
-		{name: "api key on bearer scheme", provider: auth.APIKey("ignored", "secret"), scheme: "bearer", wantSkip: true},
-		{name: "bearer on bearer scheme", provider: auth.StaticToken("tok"), scheme: "bearer", want: "tok"},
-		{name: "bearer on oauth2 scheme", provider: auth.StaticToken("tok"), scheme: "oauth2", want: "tok"},
-		{name: "bearer on apiKey scheme", provider: auth.StaticToken("tok"), scheme: "apikey", wantSkip: true},
-		{name: "bearer on mtls scheme", provider: auth.StaticToken("tok"), scheme: "mtls", wantSkip: true},
-		{name: "bearer on scheme the card does not name", provider: auth.StaticToken("tok"), scheme: "absent", wantSkip: true},
-		// The interceptor writes an API key as a header whatever the card asks
-		// for, so a query-located key would go somewhere the card never named.
-		{name: "api key on query-located apiKey scheme", provider: auth.APIKey("ignored", "secret"), scheme: "apikey-query", wantSkip: true},
-		// The interceptor always writes "Bearer", so a Basic card would get a
-		// mislabeled credential.
-		{name: "bearer on basic HTTP scheme", provider: auth.StaticToken("tok"), scheme: "basic", wantSkip: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			ctx := t.Context()
-			if !tc.noCard {
-				ctx = iremoteagent.WithAgentCard(ctx, card)
-			}
-			got, err := newCredentialsService(tc.provider).Get(ctx, "sid", a2a.SecuritySchemeName(tc.scheme))
-			if tc.wantSkip {
-				if !errors.Is(err, a2aclient.ErrCredentialNotFound) {
-					t.Fatalf("Get() error = %v, want %v so the interceptor tries the next scheme", err, a2aclient.ErrCredentialNotFound)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("Get() error = %v", err)
-			}
-			if got != tc.want {
-				t.Errorf("Get() = %q, want %q", got, tc.want)
-			}
-		})
 	}
 }
 
@@ -481,154 +223,6 @@ func TestRemoteAgent_AuthAttachesBearerHeader(t *testing.T) {
 				t.Errorf("server saw Authorization = %q, want %q", gotAuth, "Bearer secret-token")
 			}
 		})
-	}
-}
-
-// TestRemoteAgent_AuthFailOpenSendsUnauthenticated pins the fail-open contract:
-// when the provider errors, the a2a interceptor drops auth and the request still
-// goes out (unauthenticated), rather than failing the call.
-func TestRemoteAgent_AuthFailOpenSendsUnauthenticated(t *testing.T) {
-	var mu sync.Mutex
-	var gotAuth string
-	var sawRequest bool
-	srv := serveRecordingA2A(t, func(r *http.Request) {
-		mu.Lock()
-		gotAuth = r.Header.Get("Authorization")
-		sawRequest = true
-		mu.Unlock()
-	}, a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("ok")))
-
-	var calls atomic.Int32
-	failing := auth.ProviderFunc(func(context.Context) (auth.Credential, error) {
-		calls.Add(1)
-		return nil, errResolve
-	})
-
-	remoteAgent, err := NewA2A(A2AConfig{Name: "a2a", AgentCard: bearerCard(srv.URL), Auth: failing})
-	if err != nil {
-		t.Fatalf("NewA2A() error = %v", err)
-	}
-
-	ictx := newInvocationContext(t, []*session.Event{newUserHello()})
-	if _, err := runAndCollect(ictx, remoteAgent); err != nil {
-		t.Fatalf("agent.Run() error = %v; fail-open means the request should still succeed", err)
-	}
-
-	mu.Lock()
-	defer mu.Unlock()
-	if !sawRequest {
-		t.Fatal("server never received the request")
-	}
-	if gotAuth != "" {
-		t.Errorf("server saw Authorization = %q, want empty (fail-open, no credential)", gotAuth)
-	}
-	// Without this the test would also pass if the interceptor were never
-	// installed, which is not the contract being pinned.
-	if got := calls.Load(); got == 0 {
-		t.Error("the provider was never called; this test must show resolution ran and failed, not that it never ran")
-	}
-}
-
-// TestRemoteAgent_AuthAttachesAPIKeyHeader covers the apiKey scheme. The card
-// and the credential name different headers on purpose: placement comes from
-// the card alone, and APIKeyCredential.Name is ignored.
-func TestRemoteAgent_AuthAttachesAPIKeyHeader(t *testing.T) {
-	var mu sync.Mutex
-	var gotCardKey, gotCallerKey, gotAuth string
-	srv := serveRecordingA2A(t, func(r *http.Request) {
-		mu.Lock()
-		gotCardKey = r.Header.Get("X-Card-Key")
-		gotCallerKey = r.Header.Get("X-Caller-Key")
-		gotAuth = r.Header.Get("Authorization")
-		mu.Unlock()
-	}, a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("ok")))
-
-	card := newSecureCard(srv.URL,
-		a2a.NamedSecuritySchemes{
-			"apikey": a2a.APIKeySecurityScheme{Location: a2a.APIKeySecuritySchemeLocationHeader, Name: "X-Card-Key"},
-		},
-		a2a.SecurityRequirementsOptions{
-			{a2a.SecuritySchemeName("apikey"): a2a.SecuritySchemeScopes{}},
-		},
-	)
-
-	remoteAgent, err := NewA2A(A2AConfig{Name: "a2a", AgentCard: card, Auth: auth.APIKey("X-Caller-Key", "secret")})
-	if err != nil {
-		t.Fatalf("NewA2A() error = %v", err)
-	}
-
-	ictx := newInvocationContext(t, []*session.Event{newUserHello()})
-	if _, err := runAndCollect(ictx, remoteAgent); err != nil {
-		t.Fatalf("agent.Run() error = %v", err)
-	}
-
-	mu.Lock()
-	defer mu.Unlock()
-	if gotCardKey != "secret" {
-		t.Errorf("server saw X-Card-Key = %q, want %q", gotCardKey, "secret")
-	}
-	if gotCallerKey != "" {
-		t.Errorf("server saw X-Caller-Key = %q, want empty; the card names the header, not the credential", gotCallerKey)
-	}
-	if gotAuth != "" {
-		t.Errorf("server saw Authorization = %q, want empty (apiKey uses its own header)", gotAuth)
-	}
-}
-
-// TestRemoteAgent_AuthMultiSchemeCardIsDeterministic covers a card whose single
-// requirement object names two schemes. The interceptor picks among them in Go
-// map order, so without the scheme check in Get the bearer token would land in
-// the API-key header on a random subset of requests.
-func TestRemoteAgent_AuthMultiSchemeCardIsDeterministic(t *testing.T) {
-	var mu sync.Mutex
-	var placements []string
-	srv := serveRecordingA2A(t, func(r *http.Request) {
-		mu.Lock()
-		switch {
-		case r.Header.Get("Authorization") != "":
-			placements = append(placements, "Authorization="+r.Header.Get("Authorization"))
-		case r.Header.Get("X-Api-Key") != "":
-			placements = append(placements, "X-Api-Key="+r.Header.Get("X-Api-Key"))
-		default:
-			placements = append(placements, "none")
-		}
-		mu.Unlock()
-	}, a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("ok")))
-
-	card := newSecureCard(srv.URL,
-		a2a.NamedSecuritySchemes{
-			"apikey": a2a.APIKeySecurityScheme{Location: a2a.APIKeySecuritySchemeLocationHeader, Name: "X-Api-Key"},
-			"bearer": a2a.HTTPAuthSecurityScheme{Scheme: "Bearer"},
-		},
-		a2a.SecurityRequirementsOptions{{
-			a2a.SecuritySchemeName("apikey"): a2a.SecuritySchemeScopes{},
-			a2a.SecuritySchemeName("bearer"): a2a.SecuritySchemeScopes{},
-		}},
-	)
-
-	remoteAgent, err := NewA2A(A2AConfig{Name: "a2a", AgentCard: card, Auth: auth.StaticToken("secret-token")})
-	if err != nil {
-		t.Fatalf("NewA2A() error = %v", err)
-	}
-
-	// Enough runs that a coin-flip over map order would almost certainly show.
-	const runs = 40
-	for range runs {
-		if _, err := runAndCollect(newInvocationContext(t, []*session.Event{newUserHello()}), remoteAgent); err != nil {
-			t.Fatalf("agent.Run() error = %v", err)
-		}
-	}
-
-	mu.Lock()
-	defer mu.Unlock()
-	const want = "Authorization=Bearer secret-token"
-	for i, got := range placements {
-		if got != want {
-			t.Fatalf("run %d placed the credential as %q, want %q on every run (saw %d runs)", i, got, want, len(placements))
-		}
-	}
-	if len(placements) != runs {
-		t.Errorf("server saw %d requests, want %d", len(placements), runs)
 	}
 }
 
@@ -894,7 +488,7 @@ func (c scopedClient) CancelTask(ctx context.Context, req *a2a.CancelTaskRequest
 // caller had installed but never fed.
 func TestRemoteAgent_AuthUnsetLeavesTheContextAlone(t *testing.T) {
 	ictx := newInvocationContextFor(t, t.Name(), "erin", "default")
-	got := authSendContext(ictx, A2AConfig{Name: "a2a"}, bearerCard("http://example.invalid"))
+	got := authSendContext(ictx, A2AConfig{Name: "a2a"}, nil)
 	if got != context.Context(ictx) {
 		t.Errorf("authSendContext() = %T, want the invocation context unchanged", got)
 	}
@@ -1011,7 +605,7 @@ func TestAuthHTTPClientRedirectCap(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := authHTTPClient().Get(srv.URL)
+	_, err := authHTTPClient(auth.StaticToken("tok")).Get(srv.URL)
 	if err == nil {
 		t.Fatal("Get() = nil error, want the redirect cap to stop the loop")
 	}
@@ -1032,7 +626,7 @@ func TestAuthHTTPClientRedirectCap(t *testing.T) {
 // otherwise install, so this field is the only thing bounding a request for
 // every Auth user, and nothing else in the suite touches it.
 func TestAuthHTTPClientTimeout(t *testing.T) {
-	if got := authHTTPClient().Timeout; got != 3*time.Minute {
+	if got := authHTTPClient(auth.StaticToken("tok")).Timeout; got != 3*time.Minute {
 		t.Errorf("authHTTPClient().Timeout = %v, want %v", got, 3*time.Minute)
 	}
 }
@@ -1173,12 +767,12 @@ func TestRemoteAgent_AuthPreservesCallerScope(t *testing.T) {
 	}
 }
 
-// TestRemoteAgent_AuthCleanupKeepsInvocationContext covers the provider pattern
-// the Auth doc invites — recovering the ADK context by type assertion — on the
-// cleanup path, where the context is detached from the invocation and rebounded.
-// A provider that fails there sends CancelTask unauthenticated and leaks the
-// remote task.
-func TestRemoteAgent_AuthCleanupKeepsInvocationContext(t *testing.T) {
+// TestRemoteAgent_AuthCleanupReusesTheInvocationCredential pins that the cleanup
+// CancelTask carries the credential the invocation already resolved rather than
+// resolving a new one, as adk-python resolves once per invocation. The provider
+// also insists on the type assertion the Auth doc invites, so a provider that
+// relies on it keeps working.
+func TestRemoteAgent_AuthCleanupReusesTheInvocationCredential(t *testing.T) {
 	executor := &mockA2AExecutor{
 		executeFn: func(ctx context.Context, reqCtx *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
 			return func(yield func(a2a.Event, error) bool) {
@@ -1212,7 +806,9 @@ func TestRemoteAgent_AuthCleanupKeepsInvocationContext(t *testing.T) {
 
 	// Resolves from the ADK context rather than the scope, so it fails outright
 	// if the cleanup context is no longer an agent.InvocationContext.
+	var calls atomic.Int32
 	perUser := auth.ProviderFunc(func(ctx context.Context) (auth.Credential, error) {
+		calls.Add(1)
 		ictx, ok := ctx.(agent.InvocationContext)
 		if !ok {
 			return nil, fmt.Errorf("context is %T, not an agent.InvocationContext", ctx)
@@ -1240,10 +836,13 @@ func TestRemoteAgent_AuthCleanupKeepsInvocationContext(t *testing.T) {
 	if want := "Bearer tok-frank"; got != want {
 		t.Errorf("cleanup CancelTask Authorization = %q, want %q", got, want)
 	}
+	if n := calls.Load(); n != 1 {
+		t.Errorf("provider called %d times across the send and the cleanup, want 1", n)
+	}
 }
 
 // TestRedactTokenError pins that the token endpoint's response body does not
-// reach the error string, which the a2a interceptor logs at ERROR level, while
+// reach the error string, which ends up in the invocation's error event, while
 // the error chain still resolves for a caller inspecting it.
 func TestRedactTokenError(t *testing.T) {
 	const body = "sensitive-echo-of-the-request"
@@ -1438,26 +1037,42 @@ func TestMintAccessTokenHasItsOwnBudget(t *testing.T) {
 }
 
 // TestAuthContextDerivation covers the two ways an agent.InvocationContext can
-// be derived. Both must keep the credential scope and the agent card, and
+// be derived. Both must keep everything the auth transport reads — the scope,
+// the invocation's resolved credential and the card-fetch client — and
 // WithICDelta must not leave the wrapper's cancellation disagreeing with the
 // invocation context it wraps.
 func TestAuthContextDerivation(t *testing.T) {
-	card := bearerCard("http://example.invalid")
 	ictx := newInvocationContextFor(t, t.Name(), "gina", "default")
 	cfg := A2AConfig{Name: "a2a", Auth: auth.StaticToken("tok")}
-	sendCtx, ok := authSendContext(ictx, cfg, card).(agent.InvocationContext)
+	client := authHTTPClient(cfg.Auth)
+	sendCtx, ok := authSendContext(ictx, cfg, client).(agent.InvocationContext)
 	if !ok {
 		t.Fatalf("authSendContext() = %T, want an agent.InvocationContext", sendCtx)
 	}
 	wantScope := CredentialScope(ictx.Session(), cfg.Name)
+	wantCell := sendCtx.Value(credentialCellKey{})
 
-	t.Run("WithContext carries the scope and card", func(t *testing.T) {
+	t.Run("WithContext carries what the transport reads", func(t *testing.T) {
 		got := sendCtx.WithContext(context.Background())
 		if sid, ok := a2aclient.SessionIDFrom(got); !ok || sid != wantScope {
 			t.Errorf("SessionIDFrom(WithContext(...)) = %q, %v, want %q, true", sid, ok, wantScope)
 		}
-		if iremoteagent.AgentCardFrom(got) != card {
-			t.Error("WithContext() dropped the agent card")
+		if got.Value(credentialCellKey{}) != wantCell || wantCell == nil {
+			t.Error("WithContext() dropped the invocation's credential cell, so the credential would be resolved again")
+		}
+		if iremoteagent.CardFetchClientFrom(got) != client {
+			t.Error("WithContext() dropped the card-fetch client")
+		}
+		// The HTTP client wraps each request's context in a deadline of its
+		// own, which hides the invocation behind its own type. The provider
+		// must still see one through that.
+		wrapped, cancel := context.WithTimeout(got, time.Minute)
+		defer cancel()
+		if _, ok := wrapped.(agent.InvocationContext); ok {
+			t.Fatal("context.WithTimeout returned an agent.InvocationContext; the check below would prove nothing")
+		}
+		if _, ok := providerContext(wrapped).(agent.InvocationContext); !ok {
+			t.Error("the provider would not see an agent.InvocationContext through a derived, then wrapped, context")
 		}
 	})
 
@@ -1479,79 +1094,6 @@ func TestAuthContextDerivation(t *testing.T) {
 	})
 }
 
-// TestRemoteAgent_AuthMismatchWarning observes the log rather than the
-// predicate behind it. A card offering an alternative the credential does fit
-// is correct operation and must stay quiet; a card no scheme of which can carry
-// it is a caller misconfiguration nothing else reports, and must warn — once,
-// not once per scheme per request.
-func TestRemoteAgent_AuthMismatchWarning(t *testing.T) {
-	apiKeyOnly := func(url string) *a2a.AgentCard {
-		return newSecureCard(url,
-			a2a.NamedSecuritySchemes{"apikey": a2a.APIKeySecurityScheme{Location: a2a.APIKeySecuritySchemeLocationHeader, Name: "X-Api-Key"}},
-			a2a.SecurityRequirementsOptions{{a2a.SecuritySchemeName("apikey"): a2a.SecuritySchemeScopes{}}},
-		)
-	}
-	alternatives := func(url string) *a2a.AgentCard {
-		return newSecureCard(url,
-			a2a.NamedSecuritySchemes{
-				"apikey": a2a.APIKeySecurityScheme{Location: a2a.APIKeySecuritySchemeLocationHeader, Name: "X-Api-Key"},
-				"bearer": a2a.HTTPAuthSecurityScheme{Scheme: "Bearer"},
-			},
-			// Two alternative requirement objects: the interceptor tries the
-			// api key first about half the time and then falls through.
-			a2a.SecurityRequirementsOptions{
-				{a2a.SecuritySchemeName("apikey"): a2a.SecuritySchemeScopes{}},
-				{a2a.SecuritySchemeName("bearer"): a2a.SecuritySchemeScopes{}},
-			},
-		)
-	}
-	tests := []struct {
-		name     string
-		card     func(string) *a2a.AgentCard
-		wantAuth string
-		wantWarn int
-	}{
-		{name: "card offers an alternative that fits", card: alternatives, wantAuth: "Bearer secret-token", wantWarn: 0},
-		{name: "no scheme on the card can carry it", card: apiKeyOnly, wantAuth: "", wantWarn: 1},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			var mu sync.Mutex
-			var gotAuth string
-			srv := serveRecordingA2A(t, func(r *http.Request) {
-				mu.Lock()
-				gotAuth = r.Header.Get("Authorization")
-				mu.Unlock()
-			}, a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("ok")))
-
-			remoteAgent, err := NewA2A(A2AConfig{Name: "a2a", AgentCard: tc.card(srv.URL), Auth: auth.StaticToken("secret-token")})
-			if err != nil {
-				t.Fatalf("NewA2A() error = %v", err)
-			}
-
-			warns := &countingHandler{match: "no security scheme the agent card declares can carry"}
-			// Three invocations: a per-request or per-scheme warning would
-			// show up as more than one line.
-			for range 3 {
-				ictx := newInvocationContext(t, []*session.Event{newUserHello()})
-				scoped := ictx.WithContext(log.AttachLogger(ictx, slog.New(warns)))
-				if _, err := runAndCollect(scoped, remoteAgent); err != nil {
-					t.Fatalf("agent.Run() error = %v", err)
-				}
-			}
-
-			mu.Lock()
-			defer mu.Unlock()
-			if gotAuth != tc.wantAuth {
-				t.Errorf("server saw Authorization = %q, want %q", gotAuth, tc.wantAuth)
-			}
-			if got := warns.count.Load(); got != int32(tc.wantWarn) {
-				t.Errorf("mismatch warning logged %d times over 3 invocations, want %d", got, tc.wantWarn)
-			}
-		})
-	}
-}
-
 // countingHandler counts WARN records whose message contains match.
 type countingHandler struct {
 	slog.Handler
@@ -1571,8 +1113,8 @@ func (h *countingHandler) Handle(_ context.Context, r slog.Record) error {
 func (h *countingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
 func (h *countingHandler) WithGroup(string) slog.Handler      { return h }
 
-// TestRemoteAgent_AuthConcurrentInvocations exercises the interceptor and the
-// provider shared across concurrent invocations of one agent value, which is
+// TestRemoteAgent_AuthConcurrentInvocations exercises the auth transport and
+// the provider shared across concurrent invocations of one agent value, which is
 // what a real runner does and what the -race detector needs in order to say
 // anything about this path.
 func TestRemoteAgent_AuthConcurrentInvocations(t *testing.T) {
@@ -1632,8 +1174,8 @@ func TestRemoteAgent_AuthConcurrentInvocations(t *testing.T) {
 }
 
 // TestRemoteAgent_AuthAttachedToCleanupCancel pins that the cleanup CancelTask is
-// authenticated too, not just the message send — otherwise it goes out
-// unauthenticated, is rejected, and leaks the task.
+// authenticated too, not just the message send — otherwise a secured remote
+// rejects it and the task leaks.
 func TestRemoteAgent_AuthAttachedToCleanupCancel(t *testing.T) {
 	executor := &mockA2AExecutor{
 		// Submit a task and stream one artifact, then stay non-terminal until the
@@ -1754,8 +1296,8 @@ func newInvocationContextFor(t *testing.T, appName, userID, sessionID string) ag
 }
 
 // newSecureCard builds an agent card pointing at url that declares the given
-// security schemes and requirements, so the a2a AuthInterceptor attaches a
-// credential (it is a no-op unless the card carries a requirement).
+// security schemes and requirements. The auth transport never reads them, so a
+// test uses this to show the card is ignored, or where it wants a realistic card.
 func newSecureCard(url string, schemes a2a.NamedSecuritySchemes, reqs a2a.SecurityRequirementsOptions) *a2a.AgentCard {
 	return &a2a.AgentCard{
 		Name:                 "a2a",
@@ -1812,81 +1354,6 @@ func jsonRPCMethod(r *http.Request) string {
 	return rpc.Method
 }
 
-// TestRemoteAgent_AuthNoRequirementWarning covers the cards that give the a2a
-// interceptor nothing to ask about, so it never calls the adapter and the
-// request reaches the wire with no credential. The invariant is that every such
-// path says so exactly once: without the warning these are indistinguishable
-// from a remote that needs no auth.
-//
-// The empty requirement object is the case a real card carries — security: [{}]
-// is how OpenAPI spells "authentication optional" — and it is the one a length
-// check on the requirement list alone lets through.
-func TestRemoteAgent_AuthNoRequirementWarning(t *testing.T) {
-	bearerScheme := a2a.NamedSecuritySchemes{"bearer": a2a.HTTPAuthSecurityScheme{Scheme: "Bearer"}}
-	bearerRequirement := a2a.SecurityRequirementsOptions{{a2a.SecuritySchemeName("bearer"): a2a.SecuritySchemeScopes{}}}
-
-	tests := []struct {
-		name     string
-		schemes  a2a.NamedSecuritySchemes
-		reqs     a2a.SecurityRequirementsOptions
-		noAuth   bool
-		wantAuth string
-		wantWarn int32
-	}{
-		// A caller who never opted in must not get a new log line either.
-		{name: "auth unset, same silent card", schemes: bearerScheme, reqs: nil, noAuth: true, wantWarn: 0},
-		{name: "no requirement at all", schemes: bearerScheme, reqs: nil, wantWarn: 1},
-		{name: "one empty requirement object", schemes: bearerScheme, reqs: a2a.SecurityRequirementsOptions{{}}, wantWarn: 1},
-		{name: "several empty requirement objects", schemes: bearerScheme, reqs: a2a.SecurityRequirementsOptions{{}, {}}, wantWarn: 1},
-		{name: "requirement but no scheme declared", schemes: nil, reqs: bearerRequirement, wantWarn: 1},
-		{name: "a scheme is named", schemes: bearerScheme, reqs: bearerRequirement, wantAuth: "Bearer secret-token", wantWarn: 0},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			var mu sync.Mutex
-			var gotAuth string
-			srv := serveRecordingA2A(t, func(r *http.Request) {
-				mu.Lock()
-				gotAuth = r.Header.Get("Authorization")
-				mu.Unlock()
-			}, a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("ok")))
-
-			var provider auth.CredentialProvider
-			if !tc.noAuth {
-				provider = auth.StaticToken("secret-token")
-			}
-			remoteAgent, err := NewA2A(A2AConfig{
-				Name:      "a2a",
-				AgentCard: newSecureCard(srv.URL, tc.schemes, tc.reqs),
-				Auth:      provider,
-			})
-			if err != nil {
-				t.Fatalf("NewA2A() error = %v", err)
-			}
-
-			warns := &countingHandler{match: "names no security scheme to satisfy"}
-			// Three invocations: a per-invocation warning would show up as more
-			// than one line.
-			for range 3 {
-				ictx := newInvocationContext(t, []*session.Event{newUserHello()})
-				scoped := ictx.WithContext(log.AttachLogger(ictx, slog.New(warns)))
-				if _, err := runAndCollect(scoped, remoteAgent); err != nil {
-					t.Fatalf("agent.Run() error = %v", err)
-				}
-			}
-
-			mu.Lock()
-			defer mu.Unlock()
-			if gotAuth != tc.wantAuth {
-				t.Errorf("server saw Authorization = %q, want %q", gotAuth, tc.wantAuth)
-			}
-			if got := warns.count.Load(); got != tc.wantWarn {
-				t.Errorf("warning logged %d times over 3 invocations, want %d", got, tc.wantWarn)
-			}
-		})
-	}
-}
-
 // TestNewA2AOwnsAuthScope pins the one line joining the user-facing Auth field
 // to the server-side cancel path. server/adka2a/v2 reads OwnsAuthScope to
 // decide whether to scope the cancel it issues for an abandoned child task, and
@@ -1917,6 +1384,17 @@ func TestNewA2AOwnsAuthScope(t *testing.T) {
 			}
 			if got := state.A2A.OwnsAuthScope; got != tc.want {
 				t.Errorf("OwnsAuthScope = %v, want %v", got, tc.want)
+			}
+			// The adka2a server authenticates a card it fetches for a cancel
+			// through this client, so it must be set exactly when Auth is.
+			if got := state.A2A.CardFetchClient != nil; got != tc.want {
+				t.Errorf("CardFetchClient set = %v, want %v", got, tc.want)
+			}
+			// The literal, not cardFetchTimeout: a2a-go's own card resolver
+			// bounds a fetch at 30s, and authenticating it must not widen that
+			// to the three-minute RPC timeout.
+			if c := state.A2A.CardFetchClient; c != nil && c.Timeout != 30*time.Second {
+				t.Errorf("CardFetchClient.Timeout = %v, want %v", c.Timeout, 30*time.Second)
 			}
 		})
 	}
@@ -2221,123 +1699,6 @@ func TestRemoteAgent_CleanupContextTypeTracksAuth(t *testing.T) {
 	}
 }
 
-// TestCardNamesNoScheme covers the shapes that give the a2a interceptor nothing
-// to ask about at the unit level, including the nil card an AgentCardProvider
-// returning (nil, nil) would produce.
-func TestCardNamesNoScheme(t *testing.T) {
-	bearerScheme := a2a.NamedSecuritySchemes{"bearer": a2a.HTTPAuthSecurityScheme{Scheme: "Bearer"}}
-	named := a2a.SecurityRequirementsOptions{{a2a.SecuritySchemeName("bearer"): a2a.SecuritySchemeScopes{}}}
-	tests := []struct {
-		name string
-		card *a2a.AgentCard
-		want bool
-	}{
-		{name: "nil card", card: nil, want: true},
-		{name: "no schemes", card: newSecureCard("http://x.invalid", nil, named), want: true},
-		{name: "no requirements", card: newSecureCard("http://x.invalid", bearerScheme, nil), want: true},
-		{name: "empty requirement object", card: newSecureCard("http://x.invalid", bearerScheme, a2a.SecurityRequirementsOptions{{}}), want: true},
-		{name: "one empty and one naming a scheme", card: newSecureCard("http://x.invalid", bearerScheme, a2a.SecurityRequirementsOptions{{}, named[0]}), want: false},
-		{name: "a scheme is named", card: newSecureCard("http://x.invalid", bearerScheme, named), want: false},
-		// A name the card does not declare is not this function's case: the
-		// interceptor does ask, and the adapter warns that nothing fits.
-		{
-			name: "requirement names an undeclared scheme",
-			card: newSecureCard("http://x.invalid", bearerScheme, a2a.SecurityRequirementsOptions{{a2a.SecuritySchemeName("absent"): a2a.SecuritySchemeScopes{}}}),
-			want: false,
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := iremoteagent.CardNamesNoScheme(tc.card); got != tc.want {
-				t.Errorf("CardNamesNoScheme() = %v, want %v", got, tc.want)
-			}
-		})
-	}
-}
-
-// TestRemoteAgent_AuthEmptySchemeMapWarnsOnce covers the card that decodes from
-// `"securitySchemes": {}` — an empty but non-nil map. The a2a interceptor bails
-// only on a nil map, so it does ask for a credential here and the mismatch
-// warning is the right one. Reading it as "names no scheme" too would report
-// one unauthenticated send twice.
-func TestRemoteAgent_AuthEmptySchemeMapWarnsOnce(t *testing.T) {
-	srv := serveRecordingA2A(t, func(*http.Request) {}, a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("ok")))
-	card := newSecureCard(srv.URL,
-		a2a.NamedSecuritySchemes{},
-		a2a.SecurityRequirementsOptions{{a2a.SecuritySchemeName("bearer"): a2a.SecuritySchemeScopes{}}},
-	)
-	remoteAgent, err := NewA2A(A2AConfig{Name: "a2a", AgentCard: card, Auth: auth.StaticToken("tok")})
-	if err != nil {
-		t.Fatalf("NewA2A() error = %v", err)
-	}
-	noScheme := &countingHandler{match: "names no security scheme to satisfy"}
-	mismatch := &countingHandler{match: "no security scheme the agent card declares can carry"}
-	ictx := newInvocationContext(t, []*session.Event{newUserHello()})
-	scoped := ictx.WithContext(log.AttachLogger(ictx, slog.New(multiHandler{noScheme, mismatch})))
-	if _, err := runAndCollect(scoped, remoteAgent); err != nil {
-		t.Fatalf("agent.Run() error = %v", err)
-	}
-	if got := noScheme.count.Load(); got != 0 {
-		t.Errorf("no-scheme warning logged %d times, want 0: the interceptor does ask for this card", got)
-	}
-	if got := mismatch.count.Load(); got != 1 {
-		t.Errorf("mismatch warning logged %d times, want exactly 1", got)
-	}
-}
-
-// multiHandler fans a record out to several handlers, so one run can be
-// observed by two counters at once.
-type multiHandler []slog.Handler
-
-func (m multiHandler) Enabled(context.Context, slog.Level) bool { return true }
-
-func (m multiHandler) Handle(ctx context.Context, r slog.Record) error {
-	for _, h := range m {
-		if err := h.Handle(ctx, r); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-func (m multiHandler) WithAttrs([]slog.Attr) slog.Handler { return m }
-func (m multiHandler) WithGroup(string) slog.Handler      { return m }
-
-// TestCredentialsServiceWarnsPerCredentialType pins that a second, different
-// misconfiguration is still reported. A session-aware provider resolves a
-// different credential per user, so deduping the warning outright would report
-// one user's broken configuration and silently swallow every later one.
-func TestCredentialsServiceWarnsPerCredentialType(t *testing.T) {
-	// Mutual TLS carries neither placement, so both credentials below mismatch.
-	card := newSecureCard("http://example.invalid",
-		a2a.NamedSecuritySchemes{"mtls": a2a.MutualTLSSecurityScheme{}},
-		a2a.SecurityRequirementsOptions{{a2a.SecuritySchemeName("mtls"): a2a.SecuritySchemeScopes{}}},
-	)
-	var which atomic.Int32
-	svc := newCredentialsService(auth.ProviderFunc(func(context.Context) (auth.Credential, error) {
-		if which.Load() == 0 {
-			return auth.APIKeyCredential{Value: "k"}, nil
-		}
-		return auth.BearerCredential{Token: "t"}, nil
-	}))
-	warns := &countingHandler{match: "no security scheme the agent card declares can carry"}
-	ctx := log.AttachLogger(iremoteagent.WithAgentCard(t.Context(), card), slog.New(warns))
-
-	// Two requests with the first credential, then two with a different one.
-	for range 2 {
-		svc.Get(ctx, "sid", "mtls") //nolint:errcheck // the mismatch error is expected; the warning count is what is under test
-	}
-	if got := warns.count.Load(); got != 1 {
-		t.Fatalf("warning logged %d times for one credential type over two requests, want 1", got)
-	}
-	which.Store(1)
-	for range 2 {
-		svc.Get(ctx, "sid", "mtls") //nolint:errcheck // as above
-	}
-	if got := warns.count.Load(); got != 2 {
-		t.Errorf("warning logged %d times after a second, different credential type, want 2", got)
-	}
-}
-
 // TestRemoteAgent_AuthOverwritesACallerScope pins the documented ownership
 // rule: with Auth set this package owns the scope. Leaving a caller-attached
 // one in place would resolve every user of that process under one credential
@@ -2345,7 +1706,7 @@ func TestCredentialsServiceWarnsPerCredentialType(t *testing.T) {
 func TestRemoteAgent_AuthOverwritesACallerScope(t *testing.T) {
 	ictx := newInvocationContextFor(t, "shop", "iris", "s7")
 	tenant := ictx.WithContext(a2aclient.AttachSessionID(ictx, "one-tenant-for-everyone"))
-	got := authSendContext(tenant, A2AConfig{Name: "crm", Auth: auth.StaticToken("tok")}, bearerCard("http://example.invalid"))
+	got := authSendContext(tenant, A2AConfig{Name: "crm", Auth: auth.StaticToken("tok")}, nil)
 	sid, ok := a2aclient.SessionIDFrom(got)
 	if !ok {
 		t.Fatal("no credential scope on the send context")
@@ -2463,11 +1824,13 @@ func TestRemoteAgent_AuthWarnsOnCleartextInterface(t *testing.T) {
 	tests := []struct {
 		name     string
 		url      string
+		second   string
 		noAuth   bool
 		wantWarn int32
 	}{
 		{name: "loopback is not reported", url: srv.URL, wantWarn: 0},
 		{name: "non-loopback http is reported once", url: "http://remote.invalid:8080", wantWarn: 1},
+		{name: "each cleartext interface is reported", url: "http://remote.invalid:8080", second: "http://other.invalid:8080", wantWarn: 2},
 		{name: "https is not reported", url: "https://remote.invalid", wantWarn: 0},
 		{name: "auth unset stays silent", url: "http://remote.invalid:8080", noAuth: true, wantWarn: 0},
 	}
@@ -2477,7 +1840,11 @@ func TestRemoteAgent_AuthWarnsOnCleartextInterface(t *testing.T) {
 			if !tc.noAuth {
 				provider = auth.StaticToken("secret-token")
 			}
-			remoteAgent, err := NewA2A(A2AConfig{Name: "a2a", AgentCard: bearerCard(tc.url), Auth: provider})
+			card := bearerCard(tc.url)
+			if tc.second != "" {
+				card.SupportedInterfaces = append(card.SupportedInterfaces, a2a.NewAgentInterface(tc.second, a2a.TransportProtocolJSONRPC))
+			}
+			remoteAgent, err := NewA2A(A2AConfig{Name: "a2a", AgentCard: card, Auth: provider})
 			if err != nil {
 				t.Fatalf("NewA2A() error = %v", err)
 			}
@@ -2600,4 +1967,483 @@ func TestMintGroupRetiredAttemptDoesNotEvictItsSuccessor(t *testing.T) {
 	if still != callB {
 		t.Errorf("in-flight call is %p after the retired attempt finished, want the successor %p", still, callB)
 	}
+}
+
+// TestRemoteAgent_AuthCredentialDecidesPlacement pins the placement rule that
+// matches adk-python: the caller's credential writes itself, and the agent
+// card's security section is never consulted. Every row but the last uses a
+// card that asks for an API key in X-Card-Key, so a row passes only if the
+// card was ignored. The same card was run through adk-python's
+// RemoteA2aAgent configured with a bearer scheme, and it sent the bearer
+// token and no X-Card-Key.
+func TestRemoteAgent_AuthCredentialDecidesPlacement(t *testing.T) {
+	cardWantsAPIKey := func(url string) *a2a.AgentCard {
+		return newSecureCard(url,
+			a2a.NamedSecuritySchemes{"k": a2a.APIKeySecurityScheme{Location: a2a.APIKeySecuritySchemeLocationHeader, Name: "X-Card-Key"}},
+			a2a.SecurityRequirementsOptions{{a2a.SecuritySchemeName("k"): a2a.SecuritySchemeScopes{}}},
+		)
+	}
+	cardWantsNothing := func(url string) *a2a.AgentCard { return newSecureCard(url, nil, nil) }
+	tests := []struct {
+		name string
+		card func(string) *a2a.AgentCard
+		cred auth.Credential
+		want map[string]string
+	}{
+		{
+			name: "api key goes in the header the credential names",
+			card: cardWantsAPIKey, cred: auth.APIKeyCredential{Name: "X-Caller-Key", Value: "secret"},
+			want: map[string]string{"X-Caller-Key": "secret", "X-Card-Key": "", "Authorization": ""},
+		},
+		{
+			name: "bearer is sent although the card asks for an api key",
+			card: cardWantsAPIKey, cred: auth.BearerCredential{Token: "tok"},
+			want: map[string]string{"Authorization": "Bearer tok", "X-Card-Key": ""},
+		},
+		{
+			name: "basic works",
+			card: cardWantsAPIKey, cred: auth.BasicCredential{Username: "u", Password: "p"},
+			want: map[string]string{"Authorization": "Basic dTpw"},
+		},
+		{
+			name: "extra headers ride along",
+			card: cardWantsAPIKey, cred: auth.WithHeaders(auth.BearerCredential{Token: "tok"}, map[string]string{"X-Goog-User-Project": "proj"}),
+			want: map[string]string{"Authorization": "Bearer tok", "X-Goog-User-Project": "proj"},
+		},
+		{
+			name: "a pointer credential works",
+			card: cardWantsAPIKey, cred: &auth.BearerCredential{Token: "tok"},
+			want: map[string]string{"Authorization": "Bearer tok"},
+		},
+		{
+			name: "oauth2 is minted and sent as a bearer token",
+			card: cardWantsAPIKey, cred: auth.OAuth2Credential{TokenSource: oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "at"})},
+			want: map[string]string{"Authorization": "Bearer at"},
+		},
+		{
+			name: "a card that declares no security still gets the credential",
+			card: cardWantsNothing, cred: auth.BearerCredential{Token: "tok"},
+			want: map[string]string{"Authorization": "Bearer tok"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var got http.Header
+			srv := serveRecordingA2A(t, func(r *http.Request) {
+				mu.Lock()
+				got = r.Header.Clone()
+				mu.Unlock()
+			}, a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("ok")))
+			cred := tc.cred
+			remoteAgent, err := NewA2A(A2AConfig{
+				Name:      "a2a",
+				AgentCard: tc.card(srv.URL),
+				Auth:      auth.ProviderFunc(func(context.Context) (auth.Credential, error) { return cred, nil }),
+			})
+			if err != nil {
+				t.Fatalf("NewA2A() error = %v", err)
+			}
+			if _, err := runAndCollect(newInvocationContext(t, []*session.Event{newUserHello()}), remoteAgent); err != nil {
+				t.Fatalf("agent.Run() error = %v", err)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			for header, want := range tc.want {
+				if v := got.Get(header); v != want {
+					t.Errorf("server saw %s = %q, want %q", header, v, want)
+				}
+			}
+		})
+	}
+}
+
+// TestRemoteAgent_AuthFailsClosed pins that a credential which cannot be
+// resolved or applied stops the call instead of letting it go out
+// unauthenticated, as adk-python stops it. The request must not reach the
+// server at all, and the run must say why.
+func TestRemoteAgent_AuthFailsClosed(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider auth.CredentialProvider
+		wantErr  string
+		// absent must not appear anywhere the caller sees, so a secret cannot
+		// leak into the error.
+		absent string
+	}{
+		{name: "provider error", provider: auth.ProviderFunc(func(context.Context) (auth.Credential, error) { return nil, errResolve }), wantErr: "resolve auth credential"},
+		{name: "consent required", provider: auth.ProviderFunc(func(context.Context) (auth.Credential, error) {
+			return nil, &auth.ConsentRequiredError{}
+		}), wantErr: "resolve auth credential"},
+		{name: "nil credential", provider: auth.ProviderFunc(func(context.Context) (auth.Credential, error) { return nil, nil }), wantErr: "nil credential"},
+		{name: "typed nil credential", provider: auth.ProviderFunc(func(context.Context) (auth.Credential, error) {
+			return (*auth.BearerCredential)(nil), nil
+		}), wantErr: "nil credential"},
+		{name: "credential that cannot apply", provider: auth.StaticToken(""), wantErr: "apply auth credential"},
+		{name: "oauth2 mint failure", provider: auth.TokenSourceProvider(tokenSourceFunc(func() (*oauth2.Token, error) {
+			return nil, errors.New("token endpoint refused")
+		})), wantErr: "mint oauth2 token"},
+		{name: "oauth2 non-bearer token", provider: auth.TokenSourceProvider(oauth2.StaticTokenSource(&oauth2.Token{
+			AccessToken: "super-secret", TokenType: "mac",
+		})), wantErr: "cannot be sent as a bearer token", absent: "super-secret"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var hits atomic.Int32
+			srv := serveRecordingA2A(t, func(*http.Request) { hits.Add(1) }, a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("ok")))
+			remoteAgent, err := NewA2A(A2AConfig{Name: "a2a", AgentCard: bearerCard(srv.URL), Auth: tc.provider})
+			if err != nil {
+				t.Fatalf("NewA2A() error = %v", err)
+			}
+			events, err := runAndCollect(newInvocationContext(t, []*session.Event{newUserHello()}), remoteAgent)
+			if err != nil {
+				t.Fatalf("agent.Run() error = %v", err)
+			}
+			if n := hits.Load(); n != 0 {
+				t.Errorf("the server received %d requests, want 0: a credential failure must stop the request", n)
+			}
+			errEvent := firstErrorEvent(events)
+			if errEvent == nil {
+				t.Fatal("want an error event explaining the failure, got none")
+			}
+			if !strings.Contains(errEvent.ErrorMessage, tc.wantErr) {
+				t.Errorf("error event = %q, want it to contain %q", errEvent.ErrorMessage, tc.wantErr)
+			}
+			if tc.absent != "" && strings.Contains(errEvent.ErrorMessage, tc.absent) {
+				t.Errorf("error event = %q, want it not to leak %q", errEvent.ErrorMessage, tc.absent)
+			}
+		})
+	}
+}
+
+// TestRemoteAgent_AuthCoversTheCardFetchOnce pins two adk-python behaviors
+// together, because the second is only observable through the first: the
+// agent card fetch carries the credential, and the credential is resolved once
+// per invocation and reused for every call that invocation makes.
+func TestRemoteAgent_AuthCoversTheCardFetchOnce(t *testing.T) {
+	var mu sync.Mutex
+	authByPath := map[string]string{}
+	var srv *httptest.Server
+	mux := http.NewServeMux()
+	mux.Handle("/invoke", a2asrv.NewJSONRPCHandler(a2asrv.NewHandler(newA2AEventReplay(t,
+		[]a2a.Event{a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("ok"))}))))
+	mux.HandleFunc("/.well-known/agent-card.json", func(w http.ResponseWriter, _ *http.Request) {
+		card := &a2a.AgentCard{
+			SupportedInterfaces: []*a2a.AgentInterface{a2a.NewAgentInterface(srv.URL+"/invoke", a2a.TransportProtocolJSONRPC)},
+			Capabilities:        a2a.AgentCapabilities{Streaming: true},
+		}
+		if err := json.NewEncoder(w).Encode(card); err != nil {
+			t.Errorf("json.Encode(agentCard) error = %v", err)
+		}
+	})
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		authByPath[r.URL.Path] = r.Header.Get("Authorization")
+		mu.Unlock()
+		mux.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+
+	var calls atomic.Int32
+	provider := auth.ProviderFunc(func(context.Context) (auth.Credential, error) {
+		return auth.BearerCredential{Token: fmt.Sprintf("tok-%d", calls.Add(1))}, nil
+	})
+	remoteAgent, err := NewA2A(A2AConfig{Name: "a2a", AgentCardProvider: NewAgentCardProvider(srv.URL), Auth: provider})
+	if err != nil {
+		t.Fatalf("NewA2A() error = %v", err)
+	}
+	if _, err := runAndCollect(newInvocationContext(t, []*session.Event{newUserHello()}), remoteAgent); err != nil {
+		t.Fatalf("agent.Run() error = %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	for _, path := range []string{"/.well-known/agent-card.json", "/invoke"} {
+		if got, want := authByPath[path], "Bearer tok-1"; got != want {
+			t.Errorf("%s Authorization = %q, want %q", path, got, want)
+		}
+	}
+	if n := calls.Load(); n != 1 {
+		t.Errorf("provider called %d times in one invocation, want 1", n)
+	}
+}
+
+// TestRemoteAgent_AuthRefusesAnInsecureCardSource pins that the scheme of the
+// card source is checked before the fetch, because the fetch now carries the
+// credential. Checking it afterwards, with the card's interfaces, would be too
+// late: the credential would already be on the wire. adk-python orders the two
+// checks the same way.
+func TestRemoteAgent_AuthRefusesAnInsecureCardSource(t *testing.T) {
+	var calls atomic.Int32
+	provider := auth.ProviderFunc(func(context.Context) (auth.Credential, error) {
+		calls.Add(1)
+		return auth.BearerCredential{Token: "tok"}, nil
+	})
+	remoteAgent, err := NewA2A(A2AConfig{
+		Name: "a2a",
+		// Nothing listens here. A fetch attempt would fail too, but with a
+		// connection error rather than the refusal under test.
+		AgentCardProvider: NewAgentCardProvider("http://remote.invalid"),
+		Auth:              provider,
+	})
+	if err != nil {
+		t.Fatalf("NewA2A() error = %v", err)
+	}
+	events, err := runAndCollect(newInvocationContext(t, []*session.Event{newUserHello()}), remoteAgent)
+	if err != nil {
+		t.Fatalf("agent.Run() error = %v", err)
+	}
+	errEvent := firstErrorEvent(events)
+	if errEvent == nil || !strings.Contains(errEvent.ErrorMessage, "must use https") {
+		t.Fatalf("error event = %v, want the insecure card source refused", errEvent)
+	}
+	if n := calls.Load(); n != 0 {
+		t.Errorf("provider called %d times, want 0: nothing should be resolved for a fetch that is refused", n)
+	}
+}
+
+// TestRemoteAgent_AuthCleanupFailureSendsNoCancel pins the fail-closed rule on
+// the cleanup path. With the credential unavailable the CancelTask must not go
+// out unauthenticated. Leaving the remote task running is the documented cost.
+func TestRemoteAgent_AuthCleanupFailureSendsNoCancel(t *testing.T) {
+	executor := &mockA2AExecutor{
+		executeFn: func(ctx context.Context, reqCtx *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
+			return func(yield func(a2a.Event, error) bool) {
+				if !yield(a2a.NewSubmittedTask(reqCtx, reqCtx.Message), nil) {
+					return
+				}
+				if !yield(a2a.NewArtifactEvent(reqCtx, a2a.NewDataPart(map[string]any{"foo": "bar"})), nil) {
+					return
+				}
+				<-ctx.Done()
+			}
+		},
+		cancelFn: func(ctx context.Context, reqCtx *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
+			return func(yield func(a2a.Event, error) bool) {
+				yield(a2a.NewStatusUpdateEvent(reqCtx, a2a.TaskStateCanceled, nil), nil)
+			}
+		},
+	}
+	inner := a2asrv.NewJSONRPCHandler(a2asrv.NewHandler(executor))
+	var mu sync.Mutex
+	methods := map[string]int{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		m := jsonRPCMethod(r)
+		mu.Lock()
+		methods[m]++
+		mu.Unlock()
+		inner.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+
+	// The send resolves the credential and caches it for the invocation, so
+	// the cleanup would reuse it. Making the cached credential fail on its
+	// second Apply is how the cleanup's failure is produced without touching
+	// the send.
+	var applies atomic.Int32
+	cred := applyFunc(func(h http.Header) error {
+		if applies.Add(1) > 1 {
+			return errResolve
+		}
+		h.Set("Authorization", "Bearer tok")
+		return nil
+	})
+	remoteAgent, err := NewA2A(A2AConfig{
+		Name:      "a2a",
+		AgentCard: bearerCard(srv.URL),
+		Auth:      auth.ProviderFunc(func(context.Context) (auth.Credential, error) { return cred, nil }),
+	})
+	if err != nil {
+		t.Fatalf("NewA2A() error = %v", err)
+	}
+	for _, err := range remoteAgent.Run(newInvocationContextFor(t, t.Name(), "ivan", "default")) {
+		if err != nil {
+			t.Fatalf("agent.Run() error = %v", err)
+		}
+		break
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if methods["SendStreamingMessage"] != 1 {
+		t.Fatalf("SendStreamingMessage reached the server %d times, want 1 (saw %v)", methods["SendStreamingMessage"], methods)
+	}
+	if n := methods["CancelTask"]; n != 0 {
+		t.Errorf("CancelTask reached the server %d times, want 0: without a credential it must not go out", n)
+	}
+	if n := applies.Load(); n < 2 {
+		t.Errorf("the credential was applied %d times, want the cleanup to have tried; the test did not reach the path it is named for", n)
+	}
+}
+
+// applyFunc adapts a function to an [auth.Credential].
+type applyFunc func(http.Header) error
+
+func (f applyFunc) Apply(h http.Header) error { return f(h) }
+
+// TestAuthTransportUnscopedMintsDoNotShare pins that a request with no scope —
+// one made outside any invocation, like the cancel an adka2a server issues
+// without Auth ownership — never joins another request's mint. Keyed on the
+// empty scope, every such request would share one mint and one token.
+func TestAuthTransportUnscopedMintsDoNotShare(t *testing.T) {
+	release := make(chan struct{})
+	entered := make(chan struct{})
+	first := tokenSourceFunc(func() (*oauth2.Token, error) {
+		close(entered)
+		<-release
+		return &oauth2.Token{AccessToken: "first"}, nil
+	})
+	tr := &authTransport{mints: newMintGroup()}
+	go func() {
+		_ = tr.apply(context.WithoutCancel(t.Context()), auth.OAuth2Credential{TokenSource: first}, http.Header{})
+	}()
+	<-entered
+	defer close(release)
+
+	h := http.Header{}
+	done := make(chan error, 1)
+	go func() {
+		done <- tr.apply(context.WithoutCancel(t.Context()), auth.OAuth2Credential{TokenSource: oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "second"})}, h)
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("apply() error = %v", err)
+		}
+		if got := h.Get("Authorization"); got != "Bearer second" {
+			t.Errorf("Authorization = %q, want %q", got, "Bearer second")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("an unscoped request joined another unscoped request's mint")
+	}
+}
+
+// TestAuthTransportUnscopedAppliesDoNotShare is the Apply-path twin of the test
+// above: two unscoped requests with different credentials must each write
+// their own, however long the other one's Apply takes.
+func TestAuthTransportUnscopedAppliesDoNotShare(t *testing.T) {
+	release := make(chan struct{})
+	entered := make(chan struct{})
+	slow := applyFunc(func(h http.Header) error {
+		close(entered)
+		<-release
+		h.Set("Authorization", "Bearer slow")
+		return nil
+	})
+	tr := &authTransport{mints: newMintGroup(), applies: newApplyGroup()}
+	go func() { _ = tr.apply(context.WithoutCancel(t.Context()), slow, http.Header{}) }()
+	<-entered
+	defer close(release)
+
+	h := http.Header{}
+	done := make(chan error, 1)
+	go func() { done <- tr.apply(context.WithoutCancel(t.Context()), auth.BearerCredential{Token: "fast"}, h) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("apply() error = %v", err)
+		}
+		if got := h.Get("Authorization"); got != "Bearer fast" {
+			t.Errorf("Authorization = %q, want %q", got, "Bearer fast")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("an unscoped request joined another unscoped request's Apply")
+	}
+}
+
+// TestAuthTransportBoundsAPointerOAuth2Mint pins that a *auth.OAuth2Credential
+// is minted through the bounded path like the value form. Left to its own
+// Apply, a hung token endpoint would hold the request with nothing to stop it.
+func TestAuthTransportBoundsAPointerOAuth2Mint(t *testing.T) {
+	prev := mintTimeout
+	mintTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { mintTimeout = prev })
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	hung := tokenSourceFunc(func() (*oauth2.Token, error) {
+		<-release
+		return &oauth2.Token{AccessToken: "late"}, nil
+	})
+	tr := &authTransport{mints: newMintGroup()}
+	done := make(chan error, 1)
+	go func() {
+		done <- tr.apply(context.WithoutCancel(t.Context()), &auth.OAuth2Credential{TokenSource: hung}, http.Header{})
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("apply() error = %v, want it to wrap %v", err, context.DeadlineExceeded)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("apply() did not return; a pointer OAuth2 credential bypassed the mint bound")
+	}
+}
+
+// TestAuthTransportBoundsAWrappedOAuth2Credential covers the first-party shape
+// auth.WithHeaders documents — an OAuth2 credential with an extra header. It
+// cannot be recognized as OAuth2 from outside the auth package, so it writes
+// itself through its own Apply, which calls TokenSource.Token. That call must
+// still be bounded, and a token endpoint's response body must still be kept
+// out of the error.
+func TestAuthTransportBoundsAWrappedOAuth2Credential(t *testing.T) {
+	prev := mintTimeout
+	mintTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { mintTimeout = prev })
+
+	t.Run("a hung token endpoint is bounded", func(t *testing.T) {
+		release := make(chan struct{})
+		t.Cleanup(func() { close(release) })
+		hung := tokenSourceFunc(func() (*oauth2.Token, error) {
+			<-release
+			return &oauth2.Token{AccessToken: "late"}, nil
+		})
+		cred := auth.WithHeaders(auth.OAuth2Credential{TokenSource: hung}, map[string]string{"X-Goog-User-Project": "p"})
+		tr := &authTransport{mints: newMintGroup(), applies: newApplyGroup()}
+		done := make(chan error, 1)
+		go func() { done <- tr.apply(context.WithoutCancel(t.Context()), cred, http.Header{}) }()
+		select {
+		case err := <-done:
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Errorf("apply() error = %v, want it to wrap %v", err, context.DeadlineExceeded)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("apply() did not return; a wrapped OAuth2 credential bypassed the bound")
+		}
+	})
+
+	t.Run("the response body is redacted", func(t *testing.T) {
+		const body = `{"error":"invalid_grant","error_description":"assertion=eyJhbGciOi-SECRET"}`
+		failing := tokenSourceFunc(func() (*oauth2.Token, error) {
+			return nil, &oauth2.RetrieveError{
+				Response:         &http.Response{Status: "400 Bad Request", StatusCode: http.StatusBadRequest},
+				Body:             []byte(body),
+				ErrorCode:        "invalid_grant",
+				ErrorDescription: "assertion=eyJhbGciOi-SECRET",
+			}
+		})
+		cred := auth.WithHeaders(auth.OAuth2Credential{TokenSource: failing}, map[string]string{"X-Goog-User-Project": "p"})
+		tr := &authTransport{mints: newMintGroup(), applies: newApplyGroup()}
+		err := tr.apply(t.Context(), cred, http.Header{})
+		if err == nil {
+			t.Fatal("apply() = nil error, want the token endpoint's refusal")
+		}
+		if strings.Contains(err.Error(), "eyJhbGciOi-SECRET") {
+			t.Errorf("apply() error = %q, want the response body and description redacted", err)
+		}
+		if !strings.Contains(err.Error(), "invalid_grant") {
+			t.Errorf("apply() error = %q, want it to keep the error code", err)
+		}
+	})
+
+	t.Run("the result is written only once it has landed", func(t *testing.T) {
+		cred := auth.WithHeaders(auth.BearerCredential{Token: "tok"}, map[string]string{"X-Goog-User-Project": "p"})
+		tr := &authTransport{mints: newMintGroup(), applies: newApplyGroup()}
+		h := http.Header{}
+		if err := tr.apply(t.Context(), cred, h); err != nil {
+			t.Fatalf("apply() error = %v", err)
+		}
+		if h.Get("Authorization") != "Bearer tok" || h.Get("X-Goog-User-Project") != "p" {
+			t.Errorf("headers = %v, want both the bearer token and the extra header", h)
+		}
+	})
 }

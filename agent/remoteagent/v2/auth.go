@@ -28,7 +28,6 @@ import (
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2aclient"
-	"github.com/a2aproject/a2a-go/v2/log"
 	"golang.org/x/oauth2"
 
 	"google.golang.org/adk/v2/agent"
@@ -76,8 +75,8 @@ func (c authContext) Done() <-chan struct{}       { return c.ctx.Done() }
 func (c authContext) Err() error                  { return c.ctx.Err() }
 func (c authContext) Value(key any) any           { return c.ctx.Value(key) }
 
-// WithContext implements [agent.InvocationContext]. It carries the credential
-// scope and the agent card onto the replacement context, which an arbitrary
+// WithContext implements [agent.InvocationContext]. It carries what the auth
+// transport reads onto the replacement context, which an arbitrary
 // caller-supplied one would not have, and re-wraps so a later type assertion
 // still finds an agent.InvocationContext.
 func (c authContext) WithContext(ctx context.Context) agent.InvocationContext {
@@ -85,14 +84,21 @@ func (c authContext) WithContext(ctx context.Context) agent.InvocationContext {
 	return authContext{InvocationContext: c.InvocationContext.WithContext(ctx), ctx: ctx}
 }
 
-// carry copies the credential scope and the agent card onto ctx, so a context
-// derived from this one still resolves a credential.
+// carry copies what the auth transport reads — the credential scope, the
+// invocation's resolved credential and the invocation itself — onto ctx, so a
+// context derived from this one still resolves a credential.
 func (c authContext) carry(ctx context.Context) context.Context {
 	if sid, ok := a2aclient.SessionIDFrom(c.ctx); ok {
 		ctx = a2aclient.AttachSessionID(ctx, sid)
 	}
-	if card := iremoteagent.AgentCardFrom(c.ctx); card != nil {
-		ctx = iremoteagent.WithAgentCard(ctx, card)
+	if cell, ok := c.ctx.Value(credentialCellKey{}).(*credentialCell); ok {
+		ctx = context.WithValue(ctx, credentialCellKey{}, cell)
+	}
+	if ic, ok := c.ctx.Value(invocationKey{}).(agent.InvocationContext); ok {
+		ctx = context.WithValue(ctx, invocationKey{}, ic)
+	}
+	if client := iremoteagent.CardFetchClientFrom(c.ctx); client != nil {
+		ctx = iremoteagent.WithCardFetchClient(ctx, client)
 	}
 	return ctx
 }
@@ -109,18 +115,21 @@ func (c authContext) WithICDelta(d *agent.InvocationContextDelta) agent.Invocati
 }
 
 // authSendContext returns the context for every outgoing call of one
-// invocation. With Auth unset it is the invocation context untouched, so a
-// caller who never opted in sees no change at all — including no change to the
-// context's dynamic type, which reaches the exported ClientProvider hook.
+// invocation, the agent card fetch included. With Auth unset it is the
+// invocation context untouched, so a caller who never opted in sees no change
+// at all — including no change to the context's dynamic type, which reaches the
+// exported ClientProvider hook.
 //
 // With Auth set this package owns the scope, and overwrites one the caller may
-// have attached, because it also owns the interceptor that will read it.
-func authSendContext(ctx agent.InvocationContext, cfg A2AConfig, card *a2a.AgentCard) context.Context {
+// have attached, because it also owns the transport that will read it.
+func authSendContext(ctx agent.InvocationContext, cfg A2AConfig, client *http.Client) context.Context {
 	if cfg.Auth == nil {
 		return ctx
 	}
 	values := a2aclient.AttachSessionID(ctx, CredentialScope(ctx.Session(), cfg.Name))
-	values = iremoteagent.WithAgentCard(values, card)
+	values = context.WithValue(values, credentialCellKey{}, &credentialCell{})
+	values = context.WithValue(values, invocationKey{}, ctx)
+	values = iremoteagent.WithCardFetchClient(values, client)
 	return authContext{InvocationContext: ctx, ctx: values}
 }
 
@@ -136,136 +145,172 @@ func reattachInvocation(orig, derived context.Context) context.Context {
 	return authContext{InvocationContext: ic, ctx: derived}
 }
 
-// credentialsService adapts an [auth.CredentialProvider] to
-// [a2aclient.CredentialsService]. The a2a AuthInterceptor calls Get and places
-// the returned value per the agent card's security scheme — it writes the
-// "Bearer " prefix or the API-key header itself — so Get returns the raw secret.
+// authTransport applies the credential A2AConfig.Auth resolves to every request
+// the A2A client sends, and to the agent card fetch.
 //
-// The card, not the credential, decides placement, so Get yields a secret only
-// for a scheme that can carry it and returns [a2aclient.ErrCredentialNotFound]
-// otherwise, which tells the interceptor to try the next scheme. Without that
-// check the interceptor picks among the schemes named in one requirement object
-// in Go map order, and a bearer token would land in an API-key header on a
-// random subset of requests.
-type credentialsService struct {
+// The caller's credential decides where it goes, through its own Apply, not the
+// agent card: this matches adk-python, whose RemoteA2aAgent writes the header
+// its configured auth scheme names and never reads the card's security
+// section, and it matches mcptoolset.Config.Auth, which applies a credential
+// the same way through auth.Transport. So every credential type works, and a
+// card that declares no security still gets the credential.
+//
+// A credential that cannot be resolved or applied fails the request rather than
+// letting it go out unauthenticated. adk-python fails closed too, by pausing
+// the invocation to ask for consent, which this package does not do yet.
+type authTransport struct {
 	provider auth.CredentialProvider
-	// warned holds the credential types already reported by the "nothing on
-	// this card can carry it" warning. The interceptor asks per scheme per
-	// request, and a credential that fits nothing keeps not fitting, so warning
-	// every time would bury the operator in duplicates of one fact. Keyed by
-	// type rather than deduped outright because a session-aware provider can
-	// resolve a different credential per user, and a second user's different
-	// misconfiguration is a second fact, not a repeat of the first.
-	warned *sync.Map
-	// mints collapses concurrent OAuth2 token mints for one scope.
-	mints *mintGroup
+	mints    *mintGroup[string]
+	applies  *mintGroup[http.Header]
+	base     http.RoundTripper
 }
 
-var _ a2aclient.CredentialsService = credentialsService{}
+var _ http.RoundTripper = (*authTransport)(nil)
 
-// newCredentialsService builds the adapter with the state its methods assume is
-// present. Tests construct it through here too, so no test exercises a shape
-// NewA2A cannot produce.
-func newCredentialsService(p auth.CredentialProvider) credentialsService {
-	return credentialsService{provider: p, warned: &sync.Map{}, mints: newMintGroup()}
-}
-
-// Get implements [a2aclient.CredentialsService].
-func (s credentialsService) Get(ctx context.Context, sid a2aclient.SessionID, scheme a2a.SecuritySchemeName) (a2aclient.AuthCredential, error) {
-	if s.provider == nil {
-		return "", errors.New("remoteagent: a2a auth has no credential provider")
-	}
-	cred, err := s.provider.Credential(ctx)
-	if err != nil {
-		return "", fmt.Errorf("remoteagent: resolve auth credential: %w", err)
-	}
-	cred = derefCredential(cred)
-	// Reject an untransmittable credential before consulting the card, so the
-	// reason reaches the interceptor's log instead of looking like a scheme
-	// this session simply has no credential for.
-	place, err := credentialPlacement(cred)
-	if err != nil {
-		return "", err
-	}
-	card := iremoteagent.AgentCardFrom(ctx)
-	if !schemeAccepts(card, scheme, place) {
-		// The interceptor swallows this sentinel and moves on, which is right
-		// when another scheme can carry the credential — a card may offer
-		// alternatives. When none can, the request goes out unauthenticated
-		// with nothing said, and this is the only place that can see why.
-		if kind := fmt.Sprintf("%T", cred); !cardAccepts(card, place) {
-			if _, seen := s.warned.LoadOrStore(kind, struct{}{}); !seen {
-				log.Warn(ctx, "a2a auth: no security scheme the agent card declares can carry the resolved credential, so the request will go out unauthenticated",
-					"credential", kind)
-			}
+// RoundTrip implements [http.RoundTripper].
+func (t *authTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	// The RoundTripper contract makes this function responsible for the body on
+	// every early return. On success the base transport owns it.
+	bodyOwned := req.Body != nil
+	defer func() {
+		if bodyOwned {
+			_ = req.Body.Close()
 		}
-		return "", a2aclient.ErrCredentialNotFound
-	}
-	value, err := s.credentialValue(ctx, sid, cred)
+	}()
+
+	ctx := providerContext(req.Context())
+	cred, err := t.credential(ctx)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	return a2aclient.AuthCredential(value), nil
+	out := req.Clone(req.Context())
+	if err := t.apply(ctx, cred, out.Header); err != nil {
+		return nil, err
+	}
+	bodyOwned = false
+	return t.base.RoundTrip(out)
 }
 
-// placement is where the a2a AuthInterceptor would write a credential: into the
-// card-named API-key header, or into "Authorization" behind a "Bearer " prefix.
-type placement int
+// credential resolves the credential once per invocation and reuses it for
+// every request that invocation makes, as adk-python does with its
+// per-invocation credential cache. A request with no invocation behind it — the
+// cancel the adka2a server issues for an abandoned child task — resolves its
+// own. A failure is not cached, so the next request tries again.
+func (t *authTransport) credential(ctx context.Context) (auth.Credential, error) {
+	cell, _ := ctx.Value(credentialCellKey{}).(*credentialCell)
+	if cred := cell.get(); cred != nil {
+		return cred, nil
+	}
+	cred, err := t.provider.Credential(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("remoteagent: resolve auth credential: %w", err)
+	}
+	if cred == nil || isTypedNil(cred) {
+		return nil, errors.New("remoteagent: credential provider returned a nil credential")
+	}
+	cell.set(cred)
+	return cred, nil
+}
 
-const (
-	placementNone placement = iota
-	placementAPIKey
-	placementBearer
-)
+// apply writes cred onto h. Both paths run the blocking step on a bounded,
+// single-flighted goroutine, because TokenSource.Token takes no context and so
+// could otherwise hold the request past every deadline around it. A bare OAuth2
+// credential is minted directly, so its token is checked and sent as a bearer
+// token. Anything else — a credential wrapping an OAuth2 one included, such as
+// auth.WithHeaders — writes itself through its own Apply into a private header,
+// copied onto h only once the step has landed, so a caller released by its
+// deadline never races the writer.
+func (t *authTransport) apply(ctx context.Context, cred auth.Credential, h http.Header) error {
+	// The scope keys the single-flight. Without one there is no identity to
+	// share a step with, so this request runs its own.
+	scope, ok := a2aclient.SessionIDFrom(ctx)
+	mints, applies := t.mints, t.applies
+	if !ok {
+		mints, applies = newMintGroup(), newApplyGroup()
+	}
 
-// credentialPlacement reports how c would be transmitted, and errors for a
-// credential this adapter cannot transmit at all.
-func credentialPlacement(c auth.Credential) (placement, error) {
-	switch c.(type) {
-	case nil:
-		return placementNone, errors.New("remoteagent: credential provider returned a nil credential")
-	case auth.APIKeyCredential:
-		return placementAPIKey, nil
-	case auth.BearerCredential, auth.OAuth2Credential:
-		return placementBearer, nil
+	var ts oauth2.TokenSource
+	isOAuth2 := true
+	switch c := cred.(type) {
+	case auth.OAuth2Credential:
+		ts = c.TokenSource
+	case *auth.OAuth2Credential:
+		ts = c.TokenSource
 	default:
-		return placementNone, errUntransmittable(c)
+		isOAuth2 = false
 	}
+	if isOAuth2 {
+		token, err := mints.token(ctx, scope, ts)
+		if err != nil {
+			return err
+		}
+		h.Set("Authorization", "Bearer "+token)
+		return nil
+	}
+
+	written, err := applies.do(ctx, scope, func() (http.Header, error) {
+		out := http.Header{}
+		if err := cred.Apply(out); err != nil {
+			return nil, fmt.Errorf("remoteagent: apply auth credential: %w", redactTokenError(err))
+		}
+		return out, nil
+	})
+	if err != nil {
+		return err
+	}
+	for k, v := range written {
+		h[k] = append([]string(nil), v...)
+	}
+	return nil
 }
 
-func errUntransmittable(c auth.Credential) error {
-	return fmt.Errorf("remoteagent: cannot send %T over a2a, where the agent card decides placement; "+
-		"only auth.APIKeyCredential, auth.BearerCredential and auth.OAuth2Credential are supported", c)
+// credentialCell holds the credential one invocation resolved. A nil cell
+// holds nothing and ignores writes, which is what a request made outside an
+// invocation gets.
+type credentialCell struct {
+	mu   sync.Mutex
+	cred auth.Credential
 }
 
-// schemeAccepts reports whether the card's security scheme named name can carry
-// a credential written as p. It default-denies: an absent card, or a name the
-// card does not declare, yields false, so the interceptor moves on without the
-// adapter having minted anything for a scheme that cannot be satisfied.
-func schemeAccepts(card *a2a.AgentCard, name a2a.SecuritySchemeName, p placement) bool {
-	if card == nil {
-		return false
+type credentialCellKey struct{}
+
+func (c *credentialCell) get() auth.Credential {
+	if c == nil {
+		return nil
 	}
-	switch scheme := card.SecuritySchemes[name].(type) {
-	case a2a.APIKeySecurityScheme:
-		// The interceptor writes the key as a header whatever the card says, so
-		// a query- or cookie-located key would go somewhere the card never
-		// named and the remote would never read.
-		return p == placementAPIKey && scheme.Location == a2a.APIKeySecuritySchemeLocationHeader
-	case a2a.HTTPAuthSecurityScheme:
-		// The interceptor always writes "Bearer", so a card asking for Basic or
-		// any other HTTP scheme would receive a mislabeled credential.
-		return p == placementBearer && strings.EqualFold(scheme.Scheme, "bearer")
-	case a2a.OAuth2SecurityScheme:
-		return p == placementBearer
-	default:
-		// Mutual TLS, OpenID Connect, and a name the card does not declare:
-		// nothing the interceptor knows how to place.
-		return false
-	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.cred
 }
 
-// cardSendsInClear reports whether any interface the card names would put the
+func (c *credentialCell) set(cred auth.Credential) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.cred = cred
+}
+
+type invocationKey struct{}
+
+// providerContext returns ctx as the provider should see it: still an
+// agent.InvocationContext when the call was made on behalf of one, which the
+// auth.CredentialProvider contract lets a provider rely on. A transport sees
+// whatever context the A2A client built the request with, and interceptors or
+// a context.WithTimeout on the way down can hide the invocation behind their
+// own type, so it is recovered from the value authSendContext attached.
+func providerContext(ctx context.Context) context.Context {
+	if _, ok := ctx.(agent.InvocationContext); ok {
+		return ctx
+	}
+	if ic, ok := ctx.Value(invocationKey{}).(agent.InvocationContext); ok {
+		return authContext{InvocationContext: ic, ctx: ctx}
+	}
+	return ctx
+}
+
+// cardSendsInClear returns every interface the card names that would put the
 // credential on the wire unencrypted. It is not a refusal: a card can only be
 // trusted as far as its source, and a caller who points Auth at a plaintext
 // internal host has said so deliberately. Without a signal, though, that is
@@ -275,10 +320,11 @@ func schemeAccepts(card *a2a.AgentCard, name a2a.SecuritySchemeName, p placement
 // exposed by the absence of TLS, and refusing it would rule out every local
 // test server. The rule matches validateCardInterfaceOrigins, which enforces it
 // on the one card source that can be checked at fetch time.
-func cardSendsInClear(card *a2a.AgentCard) string {
+func cardSendsInClear(card *a2a.AgentCard) []string {
 	if card == nil {
-		return ""
+		return nil
 	}
+	var clear []string
 	for _, iface := range card.SupportedInterfaces {
 		if iface == nil {
 			continue
@@ -288,69 +334,10 @@ func cardSendsInClear(card *a2a.AgentCard) string {
 			continue
 		}
 		if !strings.EqualFold(u.Scheme, "https") && !isLoopbackHost(u.Hostname()) {
-			return iface.URL
+			clear = append(clear, iface.URL)
 		}
 	}
-	return ""
-}
-
-// cardAccepts reports whether any scheme the card requires can carry a
-// credential written as p.
-func cardAccepts(card *a2a.AgentCard, p placement) bool {
-	if card == nil {
-		return false
-	}
-	for _, requirement := range card.SecurityRequirements {
-		for name := range requirement {
-			if schemeAccepts(card, name, p) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// derefCredential unwraps a pointer credential. Every auth.Credential method
-// has a value receiver, so *T satisfies the interface too and passing
-// &auth.BearerCredential{...} is reasonable. A typed nil pointer is left alone
-// and lands in the untransmittable branch instead of panicking.
-func derefCredential(c auth.Credential) auth.Credential {
-	switch p := c.(type) {
-	case *auth.APIKeyCredential:
-		if p != nil {
-			return *p
-		}
-	case *auth.BearerCredential:
-		if p != nil {
-			return *p
-		}
-	case *auth.OAuth2Credential:
-		if p != nil {
-			return *p
-		}
-	}
-	return c
-}
-
-// credentialValue returns the raw secret the a2a AuthInterceptor transmits: the
-// API-key value, the bearer token, or a freshly minted OAuth2 access token.
-func (s credentialsService) credentialValue(ctx context.Context, sid a2aclient.SessionID, c auth.Credential) (string, error) {
-	switch v := c.(type) {
-	case auth.APIKeyCredential:
-		if v.Value == "" {
-			return "", errors.New("remoteagent: api key credential has an empty value")
-		}
-		return v.Value, nil
-	case auth.BearerCredential:
-		if v.Token == "" {
-			return "", errors.New("remoteagent: bearer credential has an empty token")
-		}
-		return v.Token, nil
-	case auth.OAuth2Credential:
-		return s.mints.token(ctx, sid, v.TokenSource)
-	default:
-		return "", errUntransmittable(c)
-	}
+	return clear
 }
 
 // mintTimeout bounds a token mint when the caller's context has none. The
@@ -359,125 +346,147 @@ func (s credentialsService) credentialValue(ctx context.Context, sid a2aclient.S
 // auth package's own initTimeout, and is a var so tests need not wait it out.
 var mintTimeout = 30 * time.Second
 
-// mintGroup runs at most one token mint per credential scope at a time and
-// hands the result to everyone waiting on it.
+// mintGroup runs at most one blocking credential step per credential scope at a
+// time — an OAuth2 token mint, or a credential's own Apply — and hands the
+// result to everyone waiting on it.
 //
-// The mint has to run in its own goroutine, because [oauth2.TokenSource.Token]
-// takes no context and so cannot be interrupted: only the caller's wait can be
-// bounded. Releasing the caller is what makes the single-flight necessary.
-// Without it, every request arriving while a token endpoint hangs starts
-// another mint and parks another goroutine, and neither ever ends.
+// The step has to run in its own goroutine, because [oauth2.TokenSource.Token]
+// takes no context and so cannot be interrupted, and a credential's Apply can
+// call it: only the caller's wait can be bounded. Releasing the caller is what
+// makes the single-flight necessary. Without it, every request arriving while a
+// token endpoint hangs starts another step and parks another goroutine, and
+// neither ever ends.
 //
 // The scope is the key because it is already the per-identity credential key:
-// a provider resolves one token source for one scope, so two mints under the
-// same scope are the same mint. A provider that returns a different source per
-// call for one scope would see the first source's token answer both, which is
-// why the field doc asks for a source that depends only on the scope.
-type mintGroup struct {
+// a provider resolves one credential for one scope, so two steps under the same
+// scope are the same step. A provider that returns a different credential per
+// call for one scope would see the first one's result answer both, which is why
+// the field doc asks for a credential that depends only on the scope.
+type mintGroup[T any] struct {
+	// what names the step in errors, e.g. "mint oauth2 token".
+	what     string
 	mu       sync.Mutex
-	inFlight map[a2aclient.SessionID]*mintCall
+	inFlight map[a2aclient.SessionID]*mintCall[T]
 }
 
-// mintCall is one in-flight mint. token and err are written once, before done
+// mintCall is one in-flight step. value and err are written once, before done
 // closes, and read only after it.
 //
 // deadline is the attempt's, not any one waiter's. A caller arriving midway
-// through a stuck mint waits out what is left of it rather than arming a fresh
+// through a stuck step waits out what is left of it rather than arming a fresh
 // mintTimeout of its own, and one arriving after it has passed retires the
-// attempt and starts a new mint. Without that, a token endpoint that hangs once
+// attempt and starts a new one. Without that, a token endpoint that hangs once
 // would wedge its scope for the life of the process: Token() cannot be
 // interrupted, so the entry would never be removed and every later request for
-// that identity would join a mint that can never finish. auth/gcp's provider
+// that identity would join a step that can never finish. auth/gcp's provider
 // reached the same design for the same reason.
-type mintCall struct {
+type mintCall[T any] struct {
 	done     chan struct{}
 	deadline time.Time
-	token    string
+	value    T
 	err      error
 }
 
-func newMintGroup() *mintGroup {
-	return &mintGroup{inFlight: map[a2aclient.SessionID]*mintCall{}}
+// newMintGroup returns the group for OAuth2 token mints.
+func newMintGroup() *mintGroup[string] {
+	return &mintGroup[string]{what: "mint oauth2 token", inFlight: map[a2aclient.SessionID]*mintCall[string]{}}
+}
+
+// newApplyGroup returns the group for a credential's own Apply.
+func newApplyGroup() *mintGroup[http.Header] {
+	return &mintGroup[http.Header]{what: "apply auth credential", inFlight: map[a2aclient.SessionID]*mintCall[http.Header]{}}
 }
 
 // token returns a fresh access token for scope, bounded by ctx and by
 // mintTimeout. Real sources — the JWT and ADC sources behind
 // auth.ServiceAccount and auth.ADC — post to a token endpoint through
-// http.DefaultClient, which has no timeout, and interceptors run before the
-// transport call, so nothing else bounds the mint: without mintTimeout it can
-// outlive the invocation and hold the run loop's deferred cleanup past the
-// budget that cleanup set for itself.
-func (g *mintGroup) token(ctx context.Context, scope a2aclient.SessionID, ts oauth2.TokenSource) (string, error) {
+// http.DefaultClient, which has no timeout. The mint runs inside RoundTrip and
+// Token takes no context, so neither the request's context nor the client's
+// timeout can interrupt it: without mintTimeout it can outlive the invocation
+// and hold the run loop's deferred cleanup past the budget that cleanup set for
+// itself.
+func (g *mintGroup[T]) token(ctx context.Context, scope a2aclient.SessionID, ts oauth2.TokenSource) (T, error) {
 	if ts == nil {
-		return "", errors.New("remoteagent: oauth2 credential has no token source")
+		var zero T
+		return zero, errors.New("remoteagent: oauth2 credential has no token source")
 	}
+	return g.do(ctx, scope, func() (T, error) {
+		tok, err := mintAccessToken(ts)
+		v, _ := any(tok).(T)
+		return v, err
+	})
+}
 
+// do runs step for scope, joining one already in flight, and waits for it
+// bounded by ctx and by the attempt's deadline.
+func (g *mintGroup[T]) do(ctx context.Context, scope a2aclient.SessionID, step func() (T, error)) (T, error) {
+	var zero T
 	now := time.Now()
 	g.mu.Lock()
 	call, joined := g.inFlight[scope]
 	if joined && !now.Before(call.deadline) {
-		// The attempt has spent its budget. Retire it so this caller mints
+		// The attempt has spent its budget. Retire it so this caller starts
 		// afresh instead of waiting on one that is already over time; its
 		// goroutine still publishes to whoever is on it.
 		delete(g.inFlight, scope)
 		joined = false
 	}
 	if !joined {
-		call = &mintCall{done: make(chan struct{}), deadline: now.Add(mintTimeout)}
+		call = &mintCall[T]{done: make(chan struct{}), deadline: now.Add(mintTimeout)}
 		g.inFlight[scope] = call
-		go g.run(scope, call, ts)
+		go g.run(scope, call, step)
 	}
 	g.mu.Unlock()
 
 	// A result that has already landed beats an expired bound. This narrows the
 	// race rather than closing it, so the other two arms re-check as well: when
 	// two cases are ready at once Go picks between them at random, and
-	// discarding a token that did arrive would send the request unauthenticated
-	// for no reason.
-	if done, tok, err := call.result(); done {
-		return tok, err
+	// discarding a result that did arrive would fail the request for no reason.
+	if done, v, err := call.result(); done {
+		return v, err
 	}
 	timer := time.NewTimer(call.deadline.Sub(now))
 	defer timer.Stop()
 	select {
 	case <-call.done:
-		return call.token, call.err
+		return call.value, call.err
 	case <-ctx.Done():
-		if done, tok, err := call.result(); done {
-			return tok, err
+		if done, v, err := call.result(); done {
+			return v, err
 		}
-		return "", fmt.Errorf("remoteagent: mint oauth2 token: %w", context.Cause(ctx))
+		return zero, fmt.Errorf("remoteagent: %s: %w", g.what, context.Cause(ctx))
 	case <-timer.C:
-		if done, tok, err := call.result(); done {
-			return tok, err
+		if done, v, err := call.result(); done {
+			return v, err
 		}
-		return "", fmt.Errorf("remoteagent: mint oauth2 token: %w", context.DeadlineExceeded)
+		return zero, fmt.Errorf("remoteagent: %s: %w", g.what, context.DeadlineExceeded)
 	}
 }
 
-// result reports the mint's outcome if it has landed, without blocking.
-func (c *mintCall) result() (bool, string, error) {
+// result reports the step's outcome if it has landed, without blocking.
+func (c *mintCall[T]) result() (bool, T, error) {
 	select {
 	case <-c.done:
-		return true, c.token, c.err
+		return true, c.value, c.err
 	default:
-		return false, "", nil
+		var zero T
+		return false, zero, nil
 	}
 }
 
-// run performs one mint and publishes its outcome. The entry is removed and
+// run performs one step and publishes its outcome. The entry is removed and
 // done closed under the lock, so a caller either joins this call and is woken
-// by it or finds no entry and starts a fresh one — a failed mint is never
+// by it or finds no entry and starts a fresh one — a failed step is never
 // replayed to a later request. The removal is conditional because an attempt
 // that ran past its deadline has already been retired, and a successor may hold
 // the entry by now.
-func (g *mintGroup) run(scope a2aclient.SessionID, call *mintCall, ts oauth2.TokenSource) {
+func (g *mintGroup[T]) run(scope a2aclient.SessionID, call *mintCall[T], step func() (T, error)) {
 	defer func() {
-		// Token() is third-party code on a goroutine of our own, where a panic
+		// The step is third-party code on a goroutine of our own, where a panic
 		// is fatal rather than something the runner's recover can turn into an
 		// error. auth/gcp's provider guards its own callback the same way.
 		if r := recover(); r != nil {
-			call.err = fmt.Errorf("remoteagent: mint oauth2 token: token source panicked: %v", r)
+			call.err = fmt.Errorf("remoteagent: %s: credential panicked: %v", g.what, r)
 		}
 		g.mu.Lock()
 		if g.inFlight[scope] == call {
@@ -486,7 +495,7 @@ func (g *mintGroup) run(scope a2aclient.SessionID, call *mintCall, ts oauth2.Tok
 		close(call.done)
 		g.mu.Unlock()
 	}()
-	call.token, call.err = mintAccessToken(ts)
+	call.value, call.err = step()
 }
 
 // mintAccessToken reads one access token from ts and checks it can be sent.
@@ -498,9 +507,10 @@ func mintAccessToken(ts oauth2.TokenSource) (string, error) {
 	if tok == nil || tok.AccessToken == "" {
 		return "", errors.New("remoteagent: oauth2 token source returned an empty access token")
 	}
-	// a2a always writes "Bearer", so any other type would go out mislabeled.
+	// The token is written as a bearer token, as adk-python writes it, so any
+	// other type would go out mislabeled.
 	if t := tok.Type(); !strings.EqualFold(t, "bearer") {
-		return "", fmt.Errorf("remoteagent: oauth2 token type %q cannot be sent over a2a, which always writes a bearer token", t)
+		return "", fmt.Errorf("remoteagent: oauth2 token type %q cannot be sent as a bearer token", t)
 	}
 	return tok.AccessToken, nil
 }
@@ -515,12 +525,28 @@ const a2aRequestTimeout = 3 * time.Minute
 const maxRedirects = 10
 
 // authHTTPClient is the HTTP client used when Auth is set. It refuses a
-// redirect that leaves the card's host or downgrades its scheme: the credential
-// is attached before the first hop and Go replays request headers on every hop.
-// Go strips Authorization only when the host changes, and never strips a
-// card-named API-key header, so nothing else bounds where the secret travels.
-func authHTTPClient() *http.Client {
-	return &http.Client{Timeout: a2aRequestTimeout, CheckRedirect: checkRedirect}
+// redirect that leaves the card's host or downgrades its scheme, because the
+// transport applies the credential again on every hop, so nothing else bounds
+// where the secret travels. adk-python's HTTP client follows no redirects at
+// all by default; this one still follows a same-origin redirect.
+func authHTTPClient(provider auth.CredentialProvider) *http.Client {
+	return &http.Client{
+		Timeout:       a2aRequestTimeout,
+		CheckRedirect: checkRedirect,
+		Transport:     &authTransport{provider: provider, mints: newMintGroup(), applies: newApplyGroup(), base: http.DefaultTransport},
+	}
+}
+
+// cardFetchTimeout restates the bound a2a-go's default card resolver applies.
+// Authenticating the fetch means supplying a client of our own, which would
+// otherwise carry the three-minute RPC timeout instead.
+const cardFetchTimeout = 30 * time.Second
+
+// cardFetchHTTPClient is authHTTPClient with the card resolver's timeout: the
+// same transport and redirect policy, so the fetch carries the credential under
+// the same rules as every other call.
+func cardFetchHTTPClient(rpc *http.Client) *http.Client {
+	return &http.Client{Timeout: cardFetchTimeout, CheckRedirect: rpc.CheckRedirect, Transport: rpc.Transport}
 }
 
 // checkRedirect is authHTTPClient's redirect policy. A custom CheckRedirect
@@ -605,8 +631,8 @@ func (e *redactedError) Error() string { return e.msg }
 func (e *redactedError) Unwrap() error { return e.cause }
 
 // redactTokenError strips the token endpoint's verbatim response body from an
-// [oauth2.RetrieveError]. The a2a interceptor logs whatever this adapter
-// returns at ERROR level, and what an identity provider echoes into a non-2xx
+// [oauth2.RetrieveError]. The error reaches the invocation's error event and
+// any log that records it, and what an identity provider echoes into a non-2xx
 // body is outside our control — some reflect the request back.
 //
 // It never reads the wrapper's message to decide. Deciding from the inner

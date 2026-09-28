@@ -314,59 +314,38 @@ func (e *Executor) cancelChildInputRequiredTasks(ctx context.Context, reqCtx *a2
 		return nil
 	}
 
-	type cachedClient struct {
-		client iremoteagent.A2AClient
-		card   *a2a.AgentCard
-	}
-
 	var failures []error
-	clientCache := map[string]cachedClient{}
+	clientCache := map[string]iremoteagent.A2AClient{}
 	for _, task := range tasksToCancel { // TODO(yarolegovich): run in parallel (how to limit?)
 		remoteSubagentIdx := slices.IndexFunc(subagents, func(a remoteAgent) bool { return a.agent.Name() == task.agentName })
 		if remoteSubagentIdx < 0 {
 			continue
 		}
 		remoteSubagent := subagents[remoteSubagentIdx]
-		// The subagent's client may carry the a2a auth interceptor that
-		// remoteagent.NewA2A installs for A2AConfig.Auth. That interceptor
-		// resolves nothing unless the call carries the credential scope, so
-		// without this the cancel would go out unauthenticated and a secured
-		// remote would leave its task running. The client provider sees it too,
-		// matching what the remote agent's own run loop hands it.
+		// The subagent's client may carry the auth transport remoteagent.NewA2A
+		// installs for A2AConfig.Auth, which keys the credential on the scope.
+		// Without it the provider would see no identity for this cancel, and a
+		// secured remote would leave its task running. The client provider and
+		// a card fetch see it too, matching the remote agent's own run loop.
 		id := iremoteagent.CallIdentity{AppName: cfg.AppName, UserID: meta.userID, SessionID: meta.sessionID, AgentName: task.agentName}
-		scopedCtx := iremoteagent.AttachAuthScope(ctx, remoteSubagent.config, id, nil)
-
-		cached, ok := clientCache[task.agentName]
+		scopedCtx := iremoteagent.AttachAuthScope(ctx, remoteSubagent.config, id)
+		client, ok := clientCache[task.agentName]
 		if !ok {
-			card, newClient, err := iremoteagent.CreateA2AClient(scopedCtx, remoteSubagent.config)
+			_, newClient, err := iremoteagent.CreateA2AClient(scopedCtx, remoteSubagent.config)
 			if err != nil {
 				failures = append(failures, fmt.Errorf("failed to create A2A client: %w", err))
 				continue
 			}
-			cached = cachedClient{client: newClient, card: card}
-			clientCache[task.agentName] = cached
+			clientCache[task.agentName] = newClient
+			client = newClient
 		}
-		cancelCtx := scopedCtx
-		if remoteSubagent.config.OwnsAuthScope {
-			cancelCtx = iremoteagent.WithAgentCard(scopedCtx, cached.card)
-			if iremoteagent.CardNamesNoScheme(cached.card) {
-				// The interceptor never asks for a credential for a card like
-				// this, so the cancel goes out unauthenticated and a secured
-				// remote leaves the task running. The remote agent's own run
-				// loop warns about the same card, but it does not run in this
-				// process when the task being cancelled outlived a restart.
-				log.Warn(ctx, "a2a auth: cancelling an abandoned child task against a remote agent whose card names no security scheme to satisfy, so the cancel will go out unauthenticated",
-					"agent", task.agentName, "task_id", task.taskID)
-			}
-		}
-		_, err = cached.client.CancelTask(cancelCtx, &a2a.CancelTaskRequest{ID: task.taskID})
+		_, err = client.CancelTask(scopedCtx, &a2a.CancelTaskRequest{ID: task.taskID})
 		if err != nil {
 			failures = append(failures, fmt.Errorf("failed to cancel task: %w", err))
 			continue
 		}
 	}
-	for _, cached := range clientCache {
-		client := cached.client
+	for _, client := range clientCache {
 		if err := client.Destroy(); err != nil {
 			failures = append(failures, fmt.Errorf("client destroy failed: %w", err))
 		}

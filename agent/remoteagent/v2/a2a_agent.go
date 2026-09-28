@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"iter"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"strings"
@@ -216,7 +217,17 @@ func NewAgentCardProvider(source string, opts ...agentcard.ResolveOption) AgentC
 			return nil, err
 		}
 		if !isFile {
-			card, err := agentcard.DefaultResolver.Resolve(ctx, source, opts...)
+			resolver := agentcard.DefaultResolver
+			if client := iremoteagent.CardFetchClientFrom(ctx); client != nil {
+				// The fetch carries the credential, so the scheme is checked
+				// before it goes out rather than with the card's interfaces
+				// afterwards. adk-python orders the two checks the same way.
+				if err := requireSecureCardSource(source); err != nil {
+					return nil, err
+				}
+				resolver = agentcard.NewResolver(client)
+			}
+			card, err := resolver.Resolve(ctx, source, opts...)
 			if err != nil {
 				return nil, fmt.Errorf("failed to fetch an agent card: %w", err)
 			}
@@ -237,6 +248,20 @@ func NewAgentCardProvider(source string, opts ...agentcard.ResolveOption) AgentC
 		}
 		return &card, nil
 	}
+}
+
+// requireSecureCardSource refuses to send a credential to a card source that is
+// neither https nor a loopback host, the same rule validateCardInterfaceOrigins
+// applies to the interfaces the card names.
+func requireSecureCardSource(source string) error {
+	u, err := url.Parse(source)
+	if err != nil {
+		return fmt.Errorf("%w: invalid agent card source URL %q: %w", ErrUntrustedCardInterface, source, err)
+	}
+	if u.Scheme != "https" && !isLoopbackHost(u.Hostname()) {
+		return fmt.Errorf("%w: agent card source %q must use https, or http on a loopback host, when A2AConfig.Auth is set", ErrUntrustedCardInterface, source)
+	}
+	return nil
 }
 
 // A2AConfig is used to describe and configure a remote agent.
@@ -323,74 +348,63 @@ type A2AConfig struct {
 	// when the client is built.
 	ClientProvider A2AClientProvider
 
-	// Auth, when set, resolves an end-user credential per request and attaches
-	// it to the outgoing A2A calls this agent makes whose agent card declares a
-	// matching security requirement: the message send, and the CancelTask the
-	// run loop issues when it exits before a terminal event. It does not cover
-	// the agent card fetch itself, which AgentCardProvider performs before any
-	// credential is resolved. It cannot be combined with a custom
-	// ClientProvider; set one or the other.
+	// Auth, when set, resolves an end-user credential and applies it to every
+	// A2A call this agent makes: the message send, the CancelTask the run loop
+	// issues when it exits before a terminal event, and the agent card fetch
+	// when the card comes from NewAgentCardProvider with a URL. A card fetched
+	// by a provider of your own is not covered. It cannot be combined with a
+	// custom ClientProvider; set one or the other.
+	//
+	// The credential decides where it goes, through its own Apply, exactly as
+	// it does for the field of the same name on mcptoolset.Config. The agent
+	// card's security section is not consulted, so every auth.Credential works
+	// and a card that declares no security still gets the credential. This
+	// matches adk-python's RemoteA2aAgent, whose configured auth scheme decides
+	// the header. A bare auth.OAuth2Credential's token is sent as a bearer
+	// token, and one of any other type is rejected rather than sent
+	// mislabeled. Wrapped in another credential, such as auth.WithHeaders, it
+	// writes itself, token type included.
+	//
+	// A credential that cannot be resolved or applied fails the call instead of
+	// letting it go out unauthenticated. adk-python fails closed as well, by
+	// pausing the invocation to ask the user for consent. That round-trip is
+	// not supported here yet: an *auth.ConsentRequiredError fails the call like
+	// any other error, so use static tokens, API keys, or 2-legged and
+	// service-account sources. A failure during cleanup means the CancelTask is
+	// not sent, which leaves the remote task running.
 	//
 	// Enable Auth only for remote agents whose card comes from a trusted
-	// source. The card decides where the request goes and where the credential
-	// is written, so an attacker-influenced card can exfiltrate the credential
-	// to an endpoint it controls, and a card naming an http:// interface sends
-	// it in cleartext. Redirects that leave the card's scheme and host are
-	// refused for the same reason.
+	// source, since the card decides where the request goes. An
+	// attacker-influenced card could point the credential at an endpoint it
+	// controls, and a card naming an http:// interface sends it in cleartext,
+	// which is logged once per interface. A redirect that leaves the card's
+	// scheme and host is refused, because the credential would follow it, and
+	// a card fetch that carries the credential must use https or a loopback
+	// host.
 	//
-	// Because the card dictates placement, this is narrower than the field of
-	// the same name on mcptoolset.Config, which applies the credential itself:
-	//   - Only auth.APIKeyCredential, auth.BearerCredential and
-	//     auth.OAuth2Credential can be sent. An auth.BasicCredential or an
-	//     auth.WithHeaders value is rejected, since neither survives the
-	//     protocol's single-secret handoff.
-	//   - APIKeyCredential.Name is ignored: the header name comes from the
-	//     card. An OAuth2 token whose type is not bearer is rejected rather
-	//     than sent mislabeled, because a2a always writes "Bearer".
-	//   - A card scheme a2a cannot place is skipped rather than approximated:
-	//     an API key the card wants in a query parameter or a cookie, an HTTP
-	//     scheme other than bearer, mutual TLS, and OpenID Connect.
-	//   - The OAuth2 scopes a card declares are not honoured, because the a2a
-	//     credentials interface never receives them. Scope the provider to
-	//     least privilege yourself.
+	// The provider is called once per invocation and its credential reused for
+	// every call that invocation makes, as adk-python caches it. It is called
+	// concurrently across concurrent invocations of the same agent. Its scope
+	// identifies both the caller and the callee, so a provider that caches per
+	// scope neither crosses users nor sends one remote agent's token to
+	// another: a2aclient.SessionIDFrom(ctx) yields the app name, user id,
+	// session id and this agent's Name, each percent-encoded and joined with
+	// "/". ctx is also the agent.InvocationContext, and a provider may
+	// type-assert it, except on the cancel an adka2a server issues for an
+	// abandoned child task, where only the scope is present.
 	//
-	// Resolution is fail-open: the a2a interceptor logs a resolution error and
-	// sends the request unauthenticated — which the remote will likely reject —
-	// rather than failing the call. Two consequences follow. An interactive
-	// credential cannot work here, because a *auth.ConsentRequiredError is
-	// swallowed instead of driving a consent round-trip, so use static tokens,
-	// API keys, or 2-legged / service-account sources. And a resolution failure
-	// during cleanup sends CancelTask unauthenticated, which a secured remote
-	// rejects, leaving the remote task running.
+	// The scope is only as trustworthy as the identity behind it. Behind an
+	// adka2a server the identity comes from the A2A call context, and with no
+	// authenticator configured the server synthesizes it from the context id
+	// the calling peer chose — so the scope is peer-chosen too, and a provider
+	// caching per scope would hand one peer the credential resolved for
+	// another. Set Auth on a remote agent reached that way only when the server
+	// authenticates its callers.
 	//
-	// The provider is called on every outgoing request, concurrently across
-	// concurrent invocations of the same agent, and more than once per request
-	// when the card names several security schemes. Its scope identifies both
-	// the caller and the callee, so a provider that caches per scope neither
-	// crosses users nor sends one remote agent's token to another:
-	// a2aclient.SessionIDFrom(ctx) yields the app name, user id, session id and
-	// this agent's Name, each percent-encoded and joined with "/".
-	//
-	// That holds only as far as the identity does. Behind an adka2a server the
-	// identity comes from the A2A call context, and with no authenticator
-	// configured the server synthesizes it from the context id the calling peer
-	// chose — so the scope is peer-chosen too, and a provider caching per scope
-	// would hand one peer the credential resolved for another. Set Auth on a
-	// remote agent reached that way only when the server authenticates its
-	// callers.
-	//
-	// An auth.OAuth2Credential's token source should depend on nothing finer
-	// than that scope. Concurrent mints for one scope are collapsed into one,
-	// so a source built per invocation could find its token answered by the
-	// source a sibling invocation resolved.
-	//
-	// Prefer that scope to the ADK context. On calls this agent makes, ctx is
-	// also still the agent.InvocationContext and a provider may type-assert it.
-	// A remote agent reached as a subagent of an adka2a-hosted app gets one
-	// more call — the cancel that server issues for an abandoned child task —
-	// and there the scope is present but the ADK context is not, so a provider
-	// that insists on the type assertion fails there and, fail-open, the cancel
-	// goes out unauthenticated.
+	// The credential a provider returns should depend on nothing finer than
+	// that scope. Concurrent OAuth2 mints and Apply calls for one scope are
+	// collapsed into one, so a credential built per invocation could find its
+	// result answered by the one a sibling invocation resolved.
 	Auth auth.CredentialProvider
 
 	// MessageSendConfig is attached to a2a.SendMessageRequest sent on every agent invocation.
@@ -418,27 +432,28 @@ func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 	if cfg.Auth != nil && cfg.ClientProvider != nil {
 		return nil, fmt.Errorf("A2AConfig.Auth cannot be combined with a custom ClientProvider; wire the credential into your ClientProvider instead. The context the provider receives is the ADK invocation context, so compute remoteagent.CredentialScope(ctx.Session(), name) there and have the client it returns attach that with a2aclient.AttachSessionID on every call, the cleanup CancelTask included. Do not read it back from each call's context, which is not an agent.InvocationContext on every call")
 	}
+	var authClient, cardClient *http.Client
 	if cfg.ClientProvider == nil {
 		var opts []a2aclient.FactoryOption
 		if cfg.Auth != nil {
-			httpClient := authHTTPClient()
+			authClient = authHTTPClient(cfg.Auth)
+			cardClient = cardFetchHTTPClient(authClient)
 			opts = append(opts,
-				a2aclient.WithJSONRPCTransport(httpClient),
-				a2aclient.WithRESTTransport(httpClient),
-				a2aclient.WithCallInterceptors(&a2aclient.AuthInterceptor{
-					Service: newCredentialsService(cfg.Auth),
-				}),
+				a2aclient.WithJSONRPCTransport(authClient),
+				a2aclient.WithRESTTransport(authClient),
 			)
 		}
 		cfg.ClientProvider = NewA2AClientProvider(a2aclient.NewFactory(opts...))
 	}
 
 	remoteAgent := &a2aAgent{
+		cardClient: cardClient,
 		serverConfig: &iremoteagent.A2AServerConfig{
 			AgentCard:         cfg.AgentCard,
 			AgentCardProvider: cfg.AgentCardProvider,
 			ClientProvider:    cfg.ClientProvider,
 			OwnsAuthScope:     cfg.Auth != nil,
+			CardFetchClient:   cardClient,
 		},
 	}
 	agent, err := agent.New(agent.Config{
@@ -467,45 +482,37 @@ func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 
 type a2aAgent struct {
 	serverConfig *iremoteagent.A2AServerConfig
-	// warnNoRequirement bounds the "Auth set, card wants none" warning to one
-	// per agent rather than one per invocation.
-	warnNoRequirement sync.Once
-	// warnCleartext does the same for "Auth set, card names an http:// interface".
-	warnCleartext sync.Once
+	// cardClient applies A2AConfig.Auth to a card fetch. Nil when Auth is unset.
+	cardClient *http.Client
+	// warnedCleartext holds the http:// interfaces already reported, so each
+	// is reported once per agent rather than once per invocation, and a card
+	// that later names a different one is reported again.
+	warnedCleartext sync.Map
 }
 
 func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		card, err := iremoteagent.ResolveAgentCard(ctx, a.serverConfig)
+		// Scope every outgoing call of this invocation to the ADK session so
+		// the auth transport can resolve a credential for it: the card fetch,
+		// the message send below, and the cleanup CancelTask the deferred
+		// cleanup issues. It is built before the card is resolved because the
+		// card fetch is authenticated too, as adk-python does.
+		sendCtx := authSendContext(ctx, cfg, a.cardClient)
+		card, err := iremoteagent.ResolveAgentCard(sendCtx, a.serverConfig)
 		if err != nil {
 			yield(toErrorEvent(ctx, fmt.Errorf("agent card resolution failed: %w", err)), nil)
 			return
 		}
-
-		// Scope every outgoing call of this invocation to the ADK session so
-		// the a2a auth interceptor can resolve a credential for it: the message
-		// send below, and the cleanup CancelTask the deferred cleanup issues.
-		sendCtx := authSendContext(ctx, cfg, card)
-		if cfg.Auth != nil && iremoteagent.CardNamesNoScheme(card) {
-			// The interceptor does not even ask for a credential in this case,
-			// so the request goes out unauthenticated and nothing else says so:
-			// a card that forgot its requirement looks exactly like one that
-			// needs no auth. Once per agent — the card is usually static, and
-			// the operator needs the fact, not a copy of it per request.
-			a.warnNoRequirement.Do(func() {
-				log.Warn(ctx, "a2a auth: A2AConfig.Auth is set but the agent card names no security scheme to satisfy, so no credential will be attached",
-					"agent", cfg.Name)
-			})
-		}
 		if cfg.Auth != nil {
-			if iface := cardSendsInClear(card); iface != "" {
-				// Only a fetched card is checked at resolution time, so a
-				// static, file-sourced or caller-provided one reaches here
-				// unvalidated. Once per agent, as above.
-				a.warnCleartext.Do(func() {
+			// Only a fetched card is checked at resolution time, so a static,
+			// file-sourced or caller-provided one reaches here unvalidated.
+			// Once per interface — the card is usually static, and the operator
+			// needs the fact, not a copy of it per request.
+			for _, iface := range cardSendsInClear(card) {
+				if _, seen := a.warnedCleartext.LoadOrStore(iface, struct{}{}); !seen {
 					log.Warn(ctx, "a2a auth: the agent card names a non-loopback http interface, so the credential will be sent in cleartext",
 						"agent", cfg.Name, "interface", iface)
-				})
+				}
 			}
 		}
 
