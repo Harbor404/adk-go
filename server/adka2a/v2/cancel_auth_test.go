@@ -89,19 +89,23 @@ func TestCancelChildInputRequiredTasksAuthenticatesCancel(t *testing.T) {
 		agentName = "remote"
 		contextID = "ctx-1"
 		taskID    = "task-1"
+		taskID2   = "task-2"
 		callID    = "call-1"
+		callID2   = "call-2"
 		token     = "scoped-token"
 	)
 	// toInvocationMeta derives both from the A2A context id.
 	userID, sessionID := "A2A_USER_"+contextID, contextID
 
 	var mu sync.Mutex
-	authByMethod := map[string]string{}
+	var cancelAuth []string
 	inner := a2asrv.NewJSONRPCHandler(a2asrv.NewHandler(cancelOnlyExecutor{}))
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		authByMethod[peekJSONRPCMethod(r)] = r.Header.Get("Authorization")
-		mu.Unlock()
+		if peekJSONRPCMethod(r) == "CancelTask" {
+			mu.Lock()
+			cancelAuth = append(cancelAuth, r.Header.Get("Authorization"))
+			mu.Unlock()
+		}
 		inner.ServeHTTP(w, r)
 	}))
 	defer srv.Close()
@@ -144,22 +148,27 @@ func TestCancelChildInputRequiredTasksAuthenticatesCancel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sessionService.Create() error = %v", err)
 	}
-	// The event the cancel scan matches on: authored by the remote subagent,
-	// carrying the pending call and the remote task id.
-	event := session.NewEvent(ctx, "invocation")
-	event.Author = agentName
-	event.Content = &genai.Content{
-		Role:  string(genai.RoleModel),
-		Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: callID, Name: "ask"}}},
-	}
-	event.CustomMetadata = map[string]any{customMetaTaskIDKey: taskID, customMetaContextIDKey: contextID}
-	if err := svc.AppendEvent(ctx, created.Session, event); err != nil {
-		t.Fatalf("sessionService.AppendEvent() error = %v", err)
-	}
-
-	statusParts, err := ToA2AParts(event.Content.Parts, nil)
-	if err != nil {
-		t.Fatalf("ToA2AParts() error = %v", err)
+	// Two events the cancel scan matches on, each authored by the remote
+	// subagent and carrying its own pending call and remote task id. Two,
+	// because one leaves the executor's client cache always missing, and the
+	// card it re-attaches on a cache hit comes from a different place.
+	var statusParts []*a2a.Part
+	for _, seed := range []struct{ callID, taskID string }{{callID, taskID}, {callID2, taskID2}} {
+		event := session.NewEvent(ctx, "invocation")
+		event.Author = agentName
+		event.Content = &genai.Content{
+			Role:  string(genai.RoleModel),
+			Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: seed.callID, Name: "ask"}}},
+		}
+		event.CustomMetadata = map[string]any{customMetaTaskIDKey: seed.taskID, customMetaContextIDKey: contextID}
+		if err := svc.AppendEvent(ctx, created.Session, event); err != nil {
+			t.Fatalf("sessionService.AppendEvent() error = %v", err)
+		}
+		parts, err := ToA2AParts(event.Content.Parts, nil)
+		if err != nil {
+			t.Fatalf("ToA2AParts() error = %v", err)
+		}
+		statusParts = append(statusParts, parts...)
 	}
 	status := a2a.TaskStatus{
 		State:   a2a.TaskStateInputRequired,
@@ -181,12 +190,13 @@ func TestCancelChildInputRequiredTasksAuthenticatesCancel(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	got, ok := authByMethod["CancelTask"]
-	if !ok {
-		t.Fatalf("no CancelTask reached the remote subagent (saw %v)", authByMethod)
+	if len(cancelAuth) != 2 {
+		t.Fatalf("%d CancelTask requests reached the remote subagent, want 2 (saw %q)", len(cancelAuth), cancelAuth)
 	}
-	if want := "Bearer " + token; got != want {
-		t.Errorf("CancelTask Authorization = %q, want %q", got, want)
+	for i, got := range cancelAuth {
+		if want := "Bearer " + token; got != want {
+			t.Errorf("CancelTask #%d Authorization = %q, want %q", i+1, got, want)
+		}
 	}
 }
 

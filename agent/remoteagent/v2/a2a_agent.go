@@ -367,6 +367,19 @@ type A2AConfig struct {
 	// a2aclient.SessionIDFrom(ctx) yields the app name, user id, session id and
 	// this agent's Name, each percent-encoded and joined with "/".
 	//
+	// That holds only as far as the identity does. Behind an adka2a server the
+	// identity comes from the A2A call context, and with no authenticator
+	// configured the server synthesizes it from the context id the calling peer
+	// chose — so the scope is peer-chosen too, and a provider caching per scope
+	// would hand one peer the credential resolved for another. Set Auth on a
+	// remote agent reached that way only when the server authenticates its
+	// callers.
+	//
+	// An auth.OAuth2Credential's token source should depend on nothing finer
+	// than that scope. Concurrent mints for one scope are collapsed into one,
+	// so a source built per invocation could find its token answered by the
+	// source a sibling invocation resolved.
+	//
 	// Prefer that scope to the ADK context. On calls this agent makes, ctx is
 	// also still the agent.InvocationContext and a provider may type-assert it.
 	// A remote agent reached as a subagent of an adka2a-hosted app gets one
@@ -453,6 +466,8 @@ type a2aAgent struct {
 	// warnNoRequirement bounds the "Auth set, card wants none" warning to one
 	// per agent rather than one per invocation.
 	warnNoRequirement sync.Once
+	// warnCleartext does the same for "Auth set, card names an http:// interface".
+	warnCleartext sync.Once
 }
 
 func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*session.Event, error] {
@@ -467,7 +482,7 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 		// the a2a auth interceptor can resolve a credential for it: the message
 		// send below, and the cleanup CancelTask the deferred cleanup issues.
 		sendCtx := authSendContext(ctx, cfg, card)
-		if cfg.Auth != nil && cardNamesNoScheme(card) {
+		if cfg.Auth != nil && iremoteagent.CardNamesNoScheme(card) {
 			// The interceptor does not even ask for a credential in this case,
 			// so the request goes out unauthenticated and nothing else says so:
 			// a card that forgot its requirement looks exactly like one that
@@ -477,6 +492,17 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 				log.Warn(ctx, "a2a auth: A2AConfig.Auth is set but the agent card names no security scheme to satisfy, so no credential will be attached",
 					"agent", cfg.Name)
 			})
+		}
+		if cfg.Auth != nil {
+			if iface := cardSendsInClear(card); iface != "" {
+				// Only a fetched card is checked at resolution time, so a
+				// static, file-sourced or caller-provided one reaches here
+				// unvalidated. Once per agent, as above.
+				a.warnCleartext.Do(func() {
+					log.Warn(ctx, "a2a auth: the agent card names a non-loopback http interface, so the credential will be sent in cleartext",
+						"agent", cfg.Name, "interface", iface)
+				})
+			}
 		}
 
 		sender, err := cfg.ClientProvider(sendCtx, card)

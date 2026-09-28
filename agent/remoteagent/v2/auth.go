@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/url"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -148,11 +149,14 @@ func reattachInvocation(orig, derived context.Context) context.Context {
 // random subset of requests.
 type credentialsService struct {
 	provider auth.CredentialProvider
-	// warnMismatch fires the "nothing on this card can carry it" warning once.
-	// The interceptor asks per scheme per request, and a credential that fits
-	// nothing keeps not fitting, so warning every time would bury the operator
-	// in duplicates of one fact.
-	warnMismatch *sync.Once
+	// warned holds the credential types already reported by the "nothing on
+	// this card can carry it" warning. The interceptor asks per scheme per
+	// request, and a credential that fits nothing keeps not fitting, so warning
+	// every time would bury the operator in duplicates of one fact. Keyed by
+	// type rather than deduped outright because a session-aware provider can
+	// resolve a different credential per user, and a second user's different
+	// misconfiguration is a second fact, not a repeat of the first.
+	warned *sync.Map
 	// mints collapses concurrent OAuth2 token mints for one scope.
 	mints *mintGroup
 }
@@ -163,7 +167,7 @@ var _ a2aclient.CredentialsService = credentialsService{}
 // present. Tests construct it through here too, so no test exercises a shape
 // NewA2A cannot produce.
 func newCredentialsService(p auth.CredentialProvider) credentialsService {
-	return credentialsService{provider: p, warnMismatch: &sync.Once{}, mints: newMintGroup()}
+	return credentialsService{provider: p, warned: &sync.Map{}, mints: newMintGroup()}
 }
 
 // Get implements [a2aclient.CredentialsService].
@@ -189,11 +193,11 @@ func (s credentialsService) Get(ctx context.Context, sid a2aclient.SessionID, sc
 		// when another scheme can carry the credential — a card may offer
 		// alternatives. When none can, the request goes out unauthenticated
 		// with nothing said, and this is the only place that can see why.
-		if !cardAccepts(card, place) {
-			s.warnMismatch.Do(func() {
+		if kind := fmt.Sprintf("%T", cred); !cardAccepts(card, place) {
+			if _, seen := s.warned.LoadOrStore(kind, struct{}{}); !seen {
 				log.Warn(ctx, "a2a auth: no security scheme the agent card declares can carry the resolved credential, so the request will go out unauthenticated",
-					"credential", fmt.Sprintf("%T", cred))
-			})
+					"credential", kind)
+			}
 		}
 		return "", a2aclient.ErrCredentialNotFound
 	}
@@ -261,29 +265,33 @@ func schemeAccepts(card *a2a.AgentCard, name a2a.SecuritySchemeName, p placement
 	}
 }
 
-// cardNamesNoScheme reports whether the card gives the a2a AuthInterceptor
-// nothing to ask about, so it never calls Get and the request leaves with no
-// credential and nothing logged.
+// cardSendsInClear reports whether any interface the card names would put the
+// credential on the wire unencrypted. It is not a refusal: a card can only be
+// trusted as far as its source, and a caller who points Auth at a plaintext
+// internal host has said so deliberately. Without a signal, though, that is
+// indistinguishable from not having noticed.
 //
-// The interceptor iterates the requirement objects and then the scheme names
-// inside each, so an empty requirement list, an empty scheme map and a
-// requirement object naming nothing all reach the wire the same way. The last
-// is the one a real card carries: security: [{}] is how OpenAPI spells
-// "authentication optional".
-//
-// A name the card does not declare is a different case and is not this
-// function's: there Get is called, finds no scheme that can carry the
-// credential, and warns.
-func cardNamesNoScheme(card *a2a.AgentCard) bool {
-	if card == nil || len(card.SecuritySchemes) == 0 {
-		return true
+// Loopback is not reported. A credential that never leaves the machine is not
+// exposed by the absence of TLS, and refusing it would rule out every local
+// test server. The rule matches validateCardInterfaceOrigins, which enforces it
+// on the one card source that can be checked at fetch time.
+func cardSendsInClear(card *a2a.AgentCard) string {
+	if card == nil {
+		return ""
 	}
-	for _, requirement := range card.SecurityRequirements {
-		if len(requirement) > 0 {
-			return false
+	for _, iface := range card.SupportedInterfaces {
+		if iface == nil {
+			continue
+		}
+		u, err := url.Parse(iface.URL)
+		if err != nil {
+			continue
+		}
+		if !strings.EqualFold(u.Scheme, "https") && !isLoopbackHost(u.Hostname()) {
+			return iface.URL
 		}
 	}
-	return true
+	return ""
 }
 
 // cardAccepts reports whether any scheme the card requires can carry a
@@ -363,7 +371,8 @@ var mintTimeout = 30 * time.Second
 // The scope is the key because it is already the per-identity credential key:
 // a provider resolves one token source for one scope, so two mints under the
 // same scope are the same mint. A provider that returns a different source per
-// call for one scope would see the first source's token answer both.
+// call for one scope would see the first source's token answer both, which is
+// why the field doc asks for a source that depends only on the scope.
 type mintGroup struct {
 	mu       sync.Mutex
 	inFlight map[a2aclient.SessionID]*mintCall
@@ -371,10 +380,20 @@ type mintGroup struct {
 
 // mintCall is one in-flight mint. token and err are written once, before done
 // closes, and read only after it.
+//
+// deadline is the attempt's, not any one waiter's. A caller arriving midway
+// through a stuck mint waits out what is left of it rather than arming a fresh
+// mintTimeout of its own, and one arriving after it has passed retires the
+// attempt and starts a new mint. Without that, a token endpoint that hangs once
+// would wedge its scope for the life of the process: Token() cannot be
+// interrupted, so the entry would never be removed and every later request for
+// that identity would join a mint that can never finish. auth/gcp's provider
+// reached the same design for the same reason.
 type mintCall struct {
-	done  chan struct{}
-	token string
-	err   error
+	done     chan struct{}
+	deadline time.Time
+	token    string
+	err      error
 }
 
 func newMintGroup() *mintGroup {
@@ -393,29 +412,65 @@ func (g *mintGroup) token(ctx context.Context, scope a2aclient.SessionID, ts oau
 		return "", errors.New("remoteagent: oauth2 credential has no token source")
 	}
 
+	now := time.Now()
 	g.mu.Lock()
 	call, joined := g.inFlight[scope]
+	if joined && !now.Before(call.deadline) {
+		// The attempt has spent its budget. Retire it so this caller mints
+		// afresh instead of waiting on one that is already over time; its
+		// goroutine still publishes to whoever is on it.
+		delete(g.inFlight, scope)
+		joined = false
+	}
 	if !joined {
-		call = &mintCall{done: make(chan struct{})}
+		call = &mintCall{done: make(chan struct{}), deadline: now.Add(mintTimeout)}
 		g.inFlight[scope] = call
 		go g.run(scope, call, ts)
 	}
 	g.mu.Unlock()
 
-	ctx, cancel := context.WithTimeout(ctx, mintTimeout)
-	defer cancel()
+	// A result that has already landed beats an expired bound. This narrows the
+	// race rather than closing it, so the other two arms re-check as well: when
+	// two cases are ready at once Go picks between them at random, and
+	// discarding a token that did arrive would send the request unauthenticated
+	// for no reason.
+	if done, tok, err := call.result(); done {
+		return tok, err
+	}
+	timer := time.NewTimer(call.deadline.Sub(now))
+	defer timer.Stop()
 	select {
-	case <-ctx.Done():
-		return "", fmt.Errorf("remoteagent: mint oauth2 token: %w", context.Cause(ctx))
 	case <-call.done:
 		return call.token, call.err
+	case <-ctx.Done():
+		if done, tok, err := call.result(); done {
+			return tok, err
+		}
+		return "", fmt.Errorf("remoteagent: mint oauth2 token: %w", context.Cause(ctx))
+	case <-timer.C:
+		if done, tok, err := call.result(); done {
+			return tok, err
+		}
+		return "", fmt.Errorf("remoteagent: mint oauth2 token: %w", context.DeadlineExceeded)
+	}
+}
+
+// result reports the mint's outcome if it has landed, without blocking.
+func (c *mintCall) result() (bool, string, error) {
+	select {
+	case <-c.done:
+		return true, c.token, c.err
+	default:
+		return false, "", nil
 	}
 }
 
 // run performs one mint and publishes its outcome. The entry is removed and
 // done closed under the lock, so a caller either joins this call and is woken
 // by it or finds no entry and starts a fresh one — a failed mint is never
-// replayed to a later request.
+// replayed to a later request. The removal is conditional because an attempt
+// that ran past its deadline has already been retired, and a successor may hold
+// the entry by now.
 func (g *mintGroup) run(scope a2aclient.SessionID, call *mintCall, ts oauth2.TokenSource) {
 	defer func() {
 		// Token() is third-party code on a goroutine of our own, where a panic
@@ -425,7 +480,9 @@ func (g *mintGroup) run(scope a2aclient.SessionID, call *mintCall, ts oauth2.Tok
 			call.err = fmt.Errorf("remoteagent: mint oauth2 token: token source panicked: %v", r)
 		}
 		g.mu.Lock()
-		delete(g.inFlight, scope)
+		if g.inFlight[scope] == call {
+			delete(g.inFlight, scope)
+		}
 		close(call.done)
 		g.mu.Unlock()
 	}()
@@ -552,32 +609,51 @@ func (e *redactedError) Unwrap() error { return e.cause }
 // returns at ERROR level, and what an identity provider echoes into a non-2xx
 // body is outside our control — some reflect the request back.
 //
-// Only the branch that carries the body is rewritten: RetrieveError.Error()
-// prints the body exactly when the response was not a well-formed OAuth2 error,
-// which is also when its content is least predictable. A response that did name
-// an error code takes the other branch, which prints the code, the endpoint's
-// error_description and its error_uri — free text, but three fields the
-// endpoint chose for a client to display, rather than whatever it happened to
-// write in the body. That branch is left alone. The status and the error chain
-// survive either way.
+// The test is what the message actually says, not which error type produced
+// it. Deciding from the fields instead was wrong: the token source behind
+// auth.ServiceAccount with an Audience returns a cloud.google.com/go/auth
+// *Error that prints the body itself, wrapping an *oauth2.RetrieveError whose
+// ErrorCode the adapter has already parsed out of that body — so a fields-based
+// check finds a named code, declines, and lets the wrapper print the body
+// anyway. Matching on the text redacts whatever wrapper is in front.
+//
+// A message with no verbatim body in it is returned untouched, which keeps the
+// well-formed case readable: RetrieveError.Error() then prints the error code,
+// the endpoint's error_description and its error_uri — free text, but three
+// fields the endpoint chose for a client to display, rather than whatever it
+// happened to write in the body. Those three are carried onto the redacted
+// message too. The status and the error chain survive either way.
 func redactTokenError(err error) error {
 	var re *oauth2.RetrieveError
-	if !errors.As(err, &re) || re.ErrorCode != "" || re.Response == nil {
+	if !errors.As(err, &re) || re.Response == nil || len(re.Body) == 0 {
 		return err
 	}
-	return &redactedError{
-		msg:   "oauth2: cannot fetch token: " + re.Response.Status + " (response body redacted)",
-		cause: err,
+	if !strings.Contains(err.Error(), string(re.Body)) {
+		return err
 	}
+	msg := "oauth2: cannot fetch token: " + re.Response.Status + " (response body redacted)"
+	if re.ErrorCode != "" {
+		msg += ": " + strconv.Quote(re.ErrorCode)
+		if re.ErrorDescription != "" {
+			msg += " " + strconv.Quote(re.ErrorDescription)
+		}
+		if re.ErrorURI != "" {
+			msg += " " + strconv.Quote(re.ErrorURI)
+		}
+	}
+	return &redactedError{msg: msg, cause: err}
 }
 
 // isTypedNil reports whether v is a nil func or a nil pointer held in a non-nil
 // interface — auth.ProviderFunc(nil), say. Such a value passes an ordinary
-// != nil check and then panics on the first call.
+// != nil check, and calling it panics for a nil func always and for a nil
+// pointer as soon as the method touches its receiver, which in practice it
+// does. Rejecting the rare pointer that would have worked costs a caller one
+// clear constructor error.
 //
 // Only those two kinds. A method with a value receiver on a nil named map,
 // slice or channel is callable and reads the nil fine, so rejecting one would
-// turn a working provider into a constructor error.
+// turn a working provider into a constructor error for no gain.
 func isTypedNil(v any) bool {
 	switch rv := reflect.ValueOf(v); rv.Kind() {
 	case reflect.Func, reflect.Pointer:

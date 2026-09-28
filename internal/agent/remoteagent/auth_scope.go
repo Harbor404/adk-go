@@ -84,3 +84,33 @@ func AttachAuthScope(ctx context.Context, cfg *A2AServerConfig, id CallIdentity,
 	ctx = a2aclient.AttachSessionID(ctx, CredentialScope(id.AppName, id.UserID, id.SessionID, id.AgentName))
 	return WithAgentCard(ctx, card)
 }
+
+// CardNamesNoScheme reports whether the card gives the a2a AuthInterceptor
+// nothing to ask about, so it never calls Get and the request leaves with no
+// credential and nothing logged.
+//
+// It has to agree with the interceptor exactly, because the two warnings are
+// meant to be mutually exclusive. The interceptor bails on a nil requirement
+// list or a nil scheme map, then iterates the requirement objects and the
+// scheme names inside each. A nil requirement list needs no test of its own
+// here — the loop below reaches the same answer by iterating nothing — so what
+// is left is the nil scheme map and a requirement object naming nothing. The
+// latter is the one a real card carries: security: [{}] is how OpenAPI spells
+// "authentication optional".
+//
+// Nil rather than empty is deliberate and is the interceptor's own test. A card
+// whose JSON says "securitySchemes": {} decodes to an empty but non-nil map, so
+// the interceptor does ask, finds nothing that can carry the credential, and
+// the mismatch warning covers it. Reading that case as "names no scheme" here
+// would warn about it twice.
+func CardNamesNoScheme(card *a2a.AgentCard) bool {
+	if card == nil || card.SecuritySchemes == nil {
+		return true
+	}
+	for _, requirement := range card.SecurityRequirements {
+		if len(requirement) > 0 {
+			return false
+		}
+	}
+	return true
+}

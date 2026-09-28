@@ -349,6 +349,15 @@ func (e *Executor) cancelChildInputRequiredTasks(ctx context.Context, reqCtx *a2
 		cancelCtx := scopedCtx
 		if remoteSubagent.config.OwnsAuthScope {
 			cancelCtx = iremoteagent.WithAgentCard(scopedCtx, cached.card)
+			if iremoteagent.CardNamesNoScheme(cached.card) {
+				// The interceptor never asks for a credential for a card like
+				// this, so the cancel goes out unauthenticated and a secured
+				// remote leaves the task running. The remote agent's own run
+				// loop warns about the same card, but it does not run in this
+				// process when the task being cancelled outlived a restart.
+				log.Warn(ctx, "a2a auth: cancelling an abandoned child task against a remote agent whose card names no security scheme to satisfy, so the cancel will go out unauthenticated",
+					"agent", task.agentName, "task_id", task.taskID)
+			}
 		}
 		_, err = cached.client.CancelTask(cancelCtx, &a2a.CancelTaskRequest{ID: task.taskID})
 		if err != nil {
