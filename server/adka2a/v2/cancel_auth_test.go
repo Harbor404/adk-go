@@ -21,14 +21,18 @@ import (
 	"errors"
 	"io"
 	"iter"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2aclient"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
+	"github.com/a2aproject/a2a-go/v2/log"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
@@ -317,4 +321,114 @@ func peekJSONRPCMethod(r *http.Request) string {
 	}
 	_ = json.Unmarshal(body, &rpc)
 	return rpc.Method
+}
+
+// countingHandler counts WARN records whose message contains match.
+type countingHandler struct {
+	slog.Handler
+	match string
+	count atomic.Int32
+}
+
+func (h *countingHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *countingHandler) Handle(_ context.Context, r slog.Record) error {
+	if r.Level == slog.LevelWarn && strings.Contains(r.Message, h.match) {
+		h.count.Add(1)
+	}
+	return nil
+}
+
+func (h *countingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *countingHandler) WithGroup(string) slog.Handler      { return h }
+
+// TestCancelChildInputRequiredTasksWarnsOnASchemelessCard covers the last
+// unauthenticated send that had no signal. The remote agent's own run loop
+// warns about a card naming no security scheme, but it does not run in a
+// process that only inherited the abandoned child task, so without this the
+// cancel goes out with no credential and nothing logged anywhere.
+func TestCancelChildInputRequiredTasksWarnsOnASchemelessCard(t *testing.T) {
+	const (
+		appName   = "app"
+		agentName = "remote"
+		contextID = "ctx-1"
+		taskID    = "task-1"
+		callID    = "call-1"
+	)
+	userID, sessionID := "A2A_USER_"+contextID, contextID
+
+	inner := a2asrv.NewJSONRPCHandler(a2asrv.NewHandler(cancelOnlyExecutor{}))
+	srv := httptest.NewServer(inner)
+	defer srv.Close()
+
+	tests := []struct {
+		name     string
+		schemes  a2a.NamedSecuritySchemes
+		reqs     a2a.SecurityRequirementsOptions
+		wantWarn int32
+	}{
+		{
+			name:     "card names a scheme",
+			schemes:  a2a.NamedSecuritySchemes{"bearer": a2a.HTTPAuthSecurityScheme{Scheme: "Bearer"}},
+			reqs:     a2a.SecurityRequirementsOptions{{a2a.SecuritySchemeName("bearer"): a2a.SecuritySchemeScopes{}}},
+			wantWarn: 0,
+		},
+		{
+			name:     "card names none",
+			schemes:  a2a.NamedSecuritySchemes{"bearer": a2a.HTTPAuthSecurityScheme{Scheme: "Bearer"}},
+			reqs:     a2a.SecurityRequirementsOptions{{}},
+			wantWarn: 1,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			card := &a2a.AgentCard{
+				Name:                 agentName,
+				SupportedInterfaces:  []*a2a.AgentInterface{a2a.NewAgentInterface(srv.URL, a2a.TransportProtocolJSONRPC)},
+				SecuritySchemes:      tc.schemes,
+				SecurityRequirements: tc.reqs,
+			}
+			factory := a2aclient.NewFactory()
+			remoteCfg := &iremoteagent.A2AServerConfig{
+				AgentCard:     card,
+				OwnsAuthScope: true,
+				ClientProvider: clientProviderFunc(func(ctx context.Context, c *a2a.AgentCard) (iremoteagent.A2AClient, error) {
+					return factory.CreateFromCard(ctx, c)
+				}),
+			}
+
+			warns := &countingHandler{match: "names no security scheme to satisfy"}
+			ctx := log.AttachLogger(t.Context(), slog.New(warns))
+			svc := session.InMemoryService()
+			created, err := svc.Create(ctx, &session.CreateRequest{AppName: appName, UserID: userID, SessionID: sessionID})
+			if err != nil {
+				t.Fatalf("sessionService.Create() error = %v", err)
+			}
+			event := session.NewEvent(ctx, "invocation")
+			event.Author = agentName
+			event.Content = &genai.Content{
+				Role:  string(genai.RoleModel),
+				Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: callID, Name: "ask"}}},
+			}
+			event.CustomMetadata = map[string]any{customMetaTaskIDKey: taskID, customMetaContextIDKey: contextID}
+			if err := svc.AppendEvent(ctx, created.Session, event); err != nil {
+				t.Fatalf("sessionService.AppendEvent() error = %v", err)
+			}
+			statusParts, err := ToA2AParts(event.Content.Parts, nil)
+			if err != nil {
+				t.Fatalf("ToA2AParts() error = %v", err)
+			}
+			status := a2a.TaskStatus{State: a2a.TaskStateInputRequired, Message: a2a.NewMessage(a2a.MessageRoleAgent, statusParts...)}
+
+			cfg := RunnerConfig{AppName: appName, Agent: newRemoteStateAgent(t, agentName, remoteCfg), SessionService: svc}
+			subagents := findRemoteSubagents(cfg.Agent)
+			// The stub remote has no such task, so the cancel itself fails.
+			// What is under test is whether the warning fired before it went.
+			_ = (&Executor{}).cancelChildInputRequiredTasks(ctx, &a2asrv.ExecutorContext{ContextID: contextID}, status, cfg, subagents)
+
+			if got := warns.count.Load(); got != tc.wantWarn {
+				t.Errorf("warning logged %d times, want %d", got, tc.wantWarn)
+			}
+		})
+	}
 }

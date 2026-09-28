@@ -27,6 +27,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1216,12 +1217,17 @@ func TestRedactTokenError(t *testing.T) {
 		description string
 		uri         string
 		wantKeep    []string
+		wantGone    []string
 	}{
 		{name: "malformed error response carries the body", errorCode: "", wantKeep: []string{"400 Bad Request"}},
 		{
 			name: "well-formed error response names a code", errorCode: "invalid_grant",
-			description: "the refresh token is expired", uri: "https://idp.invalid/errors/1",
-			wantKeep: []string{"invalid_grant", "the refresh token is expired", "https://idp.invalid/errors/1"},
+			description: "assertion=eyJhbGciOi-SECRET", uri: "https://idp.invalid/errors/1",
+			wantKeep: []string{"invalid_grant", "https://idp.invalid/errors/1"},
+			// Dropped with the body it was parsed out of. The endpoint this
+			// redaction exists for puts the client's own signed assertion in
+			// error_description.
+			wantGone: []string{"assertion=eyJhbGciOi-SECRET"},
 		},
 	}
 	for _, tc := range tests {
@@ -1245,6 +1251,11 @@ func TestRedactTokenError(t *testing.T) {
 			for _, want := range tc.wantKeep {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("mintGroup.token() error = %v, want it to keep %q", err, want)
+				}
+			}
+			for _, gone := range tc.wantGone {
+				if strings.Contains(err.Error(), gone) {
+					t.Errorf("mintGroup.token() error = %v, want %q dropped", err, gone)
 				}
 			}
 			var re *oauth2.RetrieveError
@@ -1308,6 +1319,29 @@ func (e *wrappedRetrieveError) Error() string {
 }
 func (e *wrappedRetrieveError) Unwrap() error { return e.inner }
 
+// quotingRetrieveError re-encodes the body instead of printing it verbatim.
+// No wrapper on any path this package uses does that today, which is exactly
+// why redaction must not depend on recognising the body in the message.
+type quotingRetrieveError struct {
+	inner *oauth2.RetrieveError
+}
+
+func (e *quotingRetrieveError) Error() string {
+	return "auth: cannot fetch token: " + strconv.Quote(string(e.inner.Body))
+}
+func (e *quotingRetrieveError) Unwrap() error { return e.inner }
+
+func TestRedactTokenErrorSeesThroughAReencodingWrapper(t *testing.T) {
+	const body = "line-one\nassertion=eyJhbGciOi-SECRET"
+	err := &quotingRetrieveError{inner: &oauth2.RetrieveError{
+		Response: &http.Response{Status: "400 Bad Request", StatusCode: http.StatusBadRequest},
+		Body:     []byte(body),
+	}}
+	if got := redactTokenError(err).Error(); strings.Contains(got, "eyJhbGciOi-SECRET") {
+		t.Errorf("redactTokenError() = %q, want the body dropped even when the wrapper re-encodes it", got)
+	}
+}
+
 func TestRedactTokenErrorSeesThroughAWrapper(t *testing.T) {
 	const body = `{"error":"invalid_grant","error_description":"assertion=eyJhbGciOi-SECRET"}`
 	err := &wrappedRetrieveError{inner: &oauth2.RetrieveError{
@@ -1319,6 +1353,11 @@ func TestRedactTokenErrorSeesThroughAWrapper(t *testing.T) {
 	got := redactTokenError(err).Error()
 	if strings.Contains(got, body) {
 		t.Errorf("redactTokenError() = %q, want the verbatim response body redacted", got)
+	}
+	// The description is parsed out of that same body, so asserting only on
+	// the whole JSON string would pass while the secret inside it survived.
+	if strings.Contains(got, "eyJhbGciOi-SECRET") {
+		t.Errorf("redactTokenError() = %q, want the assertion the endpoint echoed into error_description dropped too", got)
 	}
 	if !strings.Contains(got, "400 Bad Request") || !strings.Contains(got, "invalid_grant") {
 		t.Errorf("redactTokenError() = %q, want it to keep the status and the error code", got)
@@ -2392,7 +2431,7 @@ func TestRemoteAgent_AuthWarnsOnCleartextInterface(t *testing.T) {
 // the trade auth/gcp's provider records having already made.
 func TestMintGroupJoinerWaitsTheAttemptsRemainder(t *testing.T) {
 	prev := mintTimeout
-	mintTimeout = 300 * time.Millisecond
+	mintTimeout = 2 * time.Second
 	t.Cleanup(func() { mintTimeout = prev })
 
 	release := make(chan struct{})
@@ -2409,16 +2448,24 @@ func TestMintGroupJoinerWaitsTheAttemptsRemainder(t *testing.T) {
 	go g.token(context.WithoutCancel(t.Context()), "scope-a", hung) //nolint:errcheck // the waiter's own result is not under test
 	<-first
 
-	// Join most of the way through the attempt. A joiner that armed its own
-	// full budget would take about mintTimeout from here instead of the
-	// remainder, and the deadline below separates the two.
-	time.Sleep(mintTimeout * 3 / 4)
+	// Join halfway through the attempt. A joiner that armed its own full
+	// budget would take about mintTimeout from here rather than the half that
+	// is left, and the bound below separates the two by a wide margin.
+	time.Sleep(mintTimeout / 2)
+	g.mu.Lock()
+	call := g.inFlight["scope-a"]
+	g.mu.Unlock()
+	if call == nil || !time.Now().Before(call.deadline) {
+		t.Skip("the first attempt expired before this goroutine could join it; the machine is too loaded to time this")
+	}
+
 	start := time.Now()
 	if _, err := g.token(context.WithoutCancel(t.Context()), "scope-a", hung); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("mintGroup.token() error = %v, want it to wrap %v", err, context.DeadlineExceeded)
 	}
-	if waited := time.Since(start); waited > mintTimeout*2/3 {
-		t.Errorf("a joiner waited %v, want at most the attempt's remainder (well under %v)", waited, mintTimeout)
+	// The remainder is about mintTimeout/2; a fresh bound would be mintTimeout.
+	if waited := time.Since(start); waited > mintTimeout*3/4 {
+		t.Errorf("a joiner waited %v, want at most the attempt's remainder rather than a fresh %v", waited, mintTimeout)
 	}
 }
 

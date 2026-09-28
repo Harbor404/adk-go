@@ -609,37 +609,34 @@ func (e *redactedError) Unwrap() error { return e.cause }
 // returns at ERROR level, and what an identity provider echoes into a non-2xx
 // body is outside our control — some reflect the request back.
 //
-// The test is what the message actually says, not which error type produced
-// it. Deciding from the fields instead was wrong: the token source behind
-// auth.ServiceAccount with an Audience returns a cloud.google.com/go/auth
-// *Error that prints the body itself, wrapping an *oauth2.RetrieveError whose
-// ErrorCode the adapter has already parsed out of that body — so a fields-based
-// check finds a named code, declines, and lets the wrapper print the body
-// anyway. Matching on the text redacts whatever wrapper is in front.
+// It never reads the wrapper's message to decide. Deciding from the inner
+// error's fields was the first thing tried and it fails: the token source
+// behind auth.ServiceAccount with an Audience returns a
+// cloud.google.com/go/auth *Error that prints the body itself, wrapping an
+// *oauth2.RetrieveError whose ErrorCode the adapter has already parsed out of
+// that body — so a fields-based check finds a named code, declines, and lets
+// the wrapper print the body anyway. Searching the message for the body fixes
+// that one but only for a wrapper that prints the body verbatim: one that
+// quotes or re-encodes it would slip past.
 //
-// A message with no verbatim body in it is returned untouched, which keeps the
-// well-formed case readable: RetrieveError.Error() then prints the error code,
-// the endpoint's error_description and its error_uri — free text, but three
-// fields the endpoint chose for a client to display, rather than whatever it
-// happened to write in the body. Those three are carried onto the redacted
-// message too. The status and the error chain survive either way.
+// So a response that carried a body always gets a message built here, out of
+// the status and the two short enumerable fields, and nothing is copied from
+// whatever the wrapper wrote. error_description is dropped with the body: it
+// is unbounded free text parsed out of that same body, and the endpoint this
+// exists for puts the client's own signed assertion in it. The full error
+// stays reachable through the chain for a caller that wants it — only what
+// gets logged is rebuilt.
 func redactTokenError(err error) error {
 	var re *oauth2.RetrieveError
 	if !errors.As(err, &re) || re.Response == nil || len(re.Body) == 0 {
 		return err
 	}
-	if !strings.Contains(err.Error(), string(re.Body)) {
-		return err
-	}
 	msg := "oauth2: cannot fetch token: " + re.Response.Status + " (response body redacted)"
 	if re.ErrorCode != "" {
 		msg += ": " + strconv.Quote(re.ErrorCode)
-		if re.ErrorDescription != "" {
-			msg += " " + strconv.Quote(re.ErrorDescription)
-		}
-		if re.ErrorURI != "" {
-			msg += " " + strconv.Quote(re.ErrorURI)
-		}
+	}
+	if re.ErrorURI != "" {
+		msg += " " + strconv.Quote(re.ErrorURI)
 	}
 	return &redactedError{msg: msg, cause: err}
 }
