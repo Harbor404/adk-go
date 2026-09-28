@@ -648,9 +648,11 @@ func redactTokenError(err error) error {
 // does. Rejecting the rare pointer that would have worked costs a caller one
 // clear constructor error.
 //
-// Only those two kinds. A method with a value receiver on a nil named map,
-// slice or channel is callable and reads the nil fine, so rejecting one would
-// turn a working provider into a constructor error for no gain.
+// Only those two kinds. A value receiver on a nil named map, slice or channel
+// can be called, and whether it then works depends on what it does — reading a
+// nil map is fine, indexing a nil slice panics and receiving from a nil channel
+// blocks. No check on the kind can tell those apart, and an empty non-nil slice
+// fails the same way, so none of the three is rejected.
 func isTypedNil(v any) bool {
 	switch rv := reflect.ValueOf(v); rv.Kind() {
 	case reflect.Func, reflect.Pointer:

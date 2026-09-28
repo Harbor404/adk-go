@@ -788,44 +788,83 @@ func TestRemoteAgent_AuthProviderSeesInvocationContext(t *testing.T) {
 // With Auth unset this package touches the context not at all, so the scope has
 // to come from the caller for the interceptor to resolve anything.
 func TestRemoteAgent_AuthClientProviderScopeRemediation(t *testing.T) {
+	// A task that stays open, so breaking out of the run makes the cleanup
+	// issue a CancelTask. That call is the one whose context is a plain
+	// detached one rather than an agent.InvocationContext, which is why the
+	// remediation has to capture the scope when the client is built.
+	executor := &mockA2AExecutor{
+		executeFn: func(ctx context.Context, reqCtx *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
+			return func(yield func(a2a.Event, error) bool) {
+				if !yield(a2a.NewSubmittedTask(reqCtx, reqCtx.Message), nil) {
+					return
+				}
+				if !yield(a2a.NewArtifactEvent(reqCtx, a2a.NewDataPart(map[string]any{"foo": "bar"})), nil) {
+					return
+				}
+				<-ctx.Done()
+			}
+		},
+		cancelFn: func(ctx context.Context, reqCtx *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
+			return func(yield func(a2a.Event, error) bool) {
+				yield(a2a.NewStatusUpdateEvent(reqCtx, a2a.TaskStateCanceled, nil), nil)
+			}
+		},
+	}
+	inner := a2asrv.NewJSONRPCHandler(a2asrv.NewHandler(executor))
 	var mu sync.Mutex
-	var gotAuth string
-	srv := serveRecordingA2A(t, func(r *http.Request) {
+	authByMethod := map[string]string{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method := jsonRPCMethod(r)
 		mu.Lock()
-		gotAuth = r.Header.Get("Authorization")
+		authByMethod[method] = r.Header.Get("Authorization")
 		mu.Unlock()
-	}, a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("ok")))
+		inner.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
 
 	ictx := newInvocationContextFor(t, t.Name(), "dave", "default")
-	scope := CredentialScope(ictx.Session(), "a2a")
 	store := a2aclient.NewInMemoryCredentialsStore()
-	store.Set(scope, "bearer", "own-token")
+	store.Set(CredentialScope(ictx.Session(), "a2a"), "bearer", "own-token")
 	factory := a2aclient.NewFactory(a2aclient.WithCallInterceptors(&a2aclient.AuthInterceptor{Service: store}))
 
+	// Exactly what NewA2A's error tells a caller to do: compute the scope from
+	// the context the provider receives, and attach it on every call.
 	remoteAgent, err := NewA2A(A2AConfig{
 		Name:      "a2a",
 		AgentCard: bearerCard(srv.URL),
 		ClientProvider: func(ctx context.Context, card *a2a.AgentCard) (A2AClient, error) {
+			invocation, ok := ctx.(agent.InvocationContext)
+			if !ok {
+				return nil, fmt.Errorf("ClientProvider got %T, want the agent.InvocationContext the error message promises", ctx)
+			}
 			client, err := NewA2AClientProvider(factory)(ctx, card)
 			if err != nil {
 				return nil, err
 			}
-			// The interceptor reads the context of each call, not the one the
-			// provider was built with, so the scope has to go on per call.
-			return scopedClient{A2AClient: client, scope: scope}, nil
+			return scopedClient{A2AClient: client, scope: CredentialScope(invocation.Session(), "a2a")}, nil
 		},
 	})
 	if err != nil {
 		t.Fatalf("NewA2A() error = %v", err)
 	}
-	if _, err := runAndCollect(ictx, remoteAgent); err != nil {
-		t.Fatalf("agent.Run() error = %v", err)
+	for _, err := range remoteAgent.Run(ictx) {
+		if err != nil {
+			t.Fatalf("agent.Run() error = %v", err)
+		}
+		break
 	}
 
 	mu.Lock()
 	defer mu.Unlock()
-	if want := "Bearer own-token"; gotAuth != want {
-		t.Errorf("server saw Authorization = %q, want %q", gotAuth, want)
+	for _, method := range []string{"SendStreamingMessage", "CancelTask"} {
+		got, ok := authByMethod[method]
+		if !ok {
+			t.Errorf("no %s reached the server (saw %v)", method, authByMethod)
+			continue
+		}
+		if want := "Bearer own-token"; got != want {
+			t.Errorf("%s Authorization = %q, want %q", method, got, want)
+		}
 	}
 }
 
@@ -1953,25 +1992,58 @@ func TestMintGroupSingleFlight(t *testing.T) {
 	}
 }
 
-// TestMintGroupSeparatesScopes pins that the single-flight does not merge two
-// identities. Sharing one mint across scopes would hand one user's token to
-// another, which is the collision CredentialScope exists to prevent.
+// TestMintGroupSeparatesScopes pins that a token minted for one identity never
+// reaches another. The two mints must overlap: a second call made after the
+// first has finished finds no entry whatever the map is keyed on, so a
+// sequential version of this test passes under a key that merges identities.
+// The scopes are real ones that share their app, session and agent segments,
+// so a key that merged on any prefix, or dropped any one part, would also be
+// caught — two single-segment keys have nothing in common to merge on.
 func TestMintGroupSeparatesScopes(t *testing.T) {
-	var calls atomic.Int32
-	src := tokenSourceFunc(func() (*oauth2.Token, error) {
-		return &oauth2.Token{AccessToken: fmt.Sprintf("tok-%d", calls.Add(1))}, nil
-	})
+	scopes := []a2aclient.SessionID{
+		iremoteagent.CredentialScope("shop", "alice", "s1", "crm"),
+		iremoteagent.CredentialScope("shop", "bob", "s1", "crm"),
+		iremoteagent.CredentialScope("shop", "alice", "s2", "crm"),
+		iremoteagent.CredentialScope("shop", "alice", "s1", "billing"),
+	}
 	g := newMintGroup()
-	first, err := g.token(t.Context(), "scope-a", src)
-	if err != nil {
-		t.Fatalf("mintGroup.token() error = %v", err)
+	release := make(chan struct{})
+	entered := make(chan struct{})
+	first := tokenSourceFunc(func() (*oauth2.Token, error) {
+		close(entered)
+		<-release
+		return &oauth2.Token{AccessToken: "tok-0"}, nil
+	})
+	firstDone := make(chan string, 1)
+	go func() {
+		tok, _ := g.token(context.WithoutCancel(t.Context()), scopes[0], first)
+		firstDone <- tok
+	}()
+	<-entered
+
+	// While the first mint is still in flight, every other identity must get
+	// its own token. One that joined the first mint would block on release,
+	// so a bounded wait tells the two apart without depending on timing.
+	for i, scope := range scopes[1:] {
+		want := fmt.Sprintf("tok-%d", i+1)
+		src := tokenSourceFunc(func() (*oauth2.Token, error) { return &oauth2.Token{AccessToken: want}, nil })
+		got := make(chan string, 1)
+		go func() {
+			tok, _ := g.token(context.WithoutCancel(t.Context()), scope, src)
+			got <- tok
+		}()
+		select {
+		case tok := <-got:
+			if tok != want {
+				t.Errorf("%s got %q, want %q", scope, tok, want)
+			}
+		case <-time.After(5 * time.Second):
+			t.Errorf("%s joined the in-flight mint for %s instead of minting its own", scope, scopes[0])
+		}
 	}
-	second, err := g.token(t.Context(), "scope-b", src)
-	if err != nil {
-		t.Fatalf("mintGroup.token() error = %v", err)
-	}
-	if first == second {
-		t.Errorf("two scopes both got %q, want a mint each", first)
+	close(release)
+	if tok := <-firstDone; tok != "tok-0" {
+		t.Errorf("%s got %q, want %q", scopes[0], tok, "tok-0")
 	}
 }
 
