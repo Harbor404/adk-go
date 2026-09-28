@@ -123,10 +123,16 @@ func TestEdgeBuilder_AddRoutesSortsByRoute(t *testing.T) {
 	// insertion order and nothing else, so a test only separates sorted from
 	// unsorted where the sorted sequence is outside that set of rotations.
 	// Reversing achieves it for three keys or more, and for two it does not,
-	// because there the reverse is itself a rotation. Reorder this literal
-	// into a rotation of sorted order and the test starts passing against
-	// the unfixed code whenever iteration happens to begin at the matching
-	// offset, which is one of the four it picks from.
+	// because there the reverse is itself a rotation.
+	//
+	// Those rotations are not equally likely, which makes tidying this
+	// literal worse than it looks. Iteration starts at one of the group's
+	// eight slots, and with four entries the four empty slots all fall
+	// through to the first entry, so insertion order comes up five times in
+	// eight and each other rotation once in eight. Sorting the literal, the
+	// obvious tidy-up, would leave the test passing against the unfixed code
+	// about five runs in eight. Measured on go1.26.6 over a million draws:
+	// 0.625 for sorted, 0.125 for any other rotation.
 	routes := map[string]Node{
 		"tech":    newDummyNode("tech_node"),
 		"sales":   newDummyNode("sales_node"),

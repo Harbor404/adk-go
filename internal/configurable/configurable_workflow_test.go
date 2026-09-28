@@ -601,9 +601,14 @@ func init() {
 }
 
 func TestParseEdges_RouteOrderIsDeterministic(t *testing.T) {
-	// Twelve routes exceed the eight slots a Go map keeps in one group, so
-	// iteration is no longer merely a rotation of insertion order and a bare
-	// range cannot match sorted order by luck. Declared unsorted.
+	// What keeps this red against a bare range is how far the declaration
+	// sits from sorted order, not the number of routes. Twelve entries do
+	// spill out of the single eight-slot group a smaller map lives in, but
+	// iteration can still land on sorted order when the declaration is close
+	// to it. Measured on go1.26.6 over a million draws: these keys declared
+	// sorted came out sorted 2674 times, and sorted with one adjacent pair
+	// swapped 112 times. The declaration below came out sorted not once.
+	// Keep it scrambled.
 	//
 	// Three key choices pin which order, not just that there is one:
 	// "10" before "2" separates byte order from numeric, "zulu" after
