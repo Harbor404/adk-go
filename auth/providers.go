@@ -168,10 +168,11 @@ func ServiceAccount(cfg ServiceAccountConfig) CredentialProvider {
 		}
 		if len(cfg.JSONKey) > 0 {
 			// An explicit-key access token is scope-bound, so no scopes = unusable.
-			// Fail at wiring time rather than at request time, which is also where
-			// adk-python fails it (service_account_exchanger.py raises for an
-			// explicit key with no scopes; only the default-credential branch
-			// defaults them, as this one does above).
+			// This runs on the first Credential call, not in ServiceAccount, which
+			// returns no error and so cannot fail at construction. adk-python
+			// rejects the same case at the same point, when it first exchanges the
+			// key (service_account_exchanger.py), and defaults scopes only for
+			// default credentials, as adcTokenSource does below.
 			if len(cfg.Scopes) == 0 {
 				return nil, fmt.Errorf("auth: scopes are required for a service-account access token")
 			}

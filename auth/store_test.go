@@ -15,6 +15,7 @@
 package auth_test
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -114,13 +115,24 @@ func TestInMemoryCredentialStoreOverwrite(t *testing.T) {
 
 func TestInMemoryCredentialStoreSetRequiresCredentialAndExpiry(t *testing.T) {
 	s := auth.NewInMemoryCredentialStore()
-	key := auth.CredentialKey{Key: "res"}
-	if err := s.Set(t.Context(), key, nil, time.Now().Add(time.Hour)); err == nil {
-		t.Error("Set() with a nil credential = nil error, want error")
+	key := auth.CredentialKey{AppName: "app-name-marker", UserID: "user-id-marker", Key: "slot-marker"}
+	errs := map[string]error{
+		"a nil credential": s.Set(t.Context(), key, nil, time.Now().Add(time.Hour)),
+		// A zero expiry must not silently mean "cache forever".
+		"a zero expiry": s.Set(t.Context(), key, auth.BearerCredential{Token: "t"}, time.Time{}),
 	}
-	// A zero expiry must not silently mean "cache forever".
-	if err := s.Set(t.Context(), key, auth.BearerCredential{Token: "t"}, time.Time{}); err == nil {
-		t.Error("Set() with a zero expiry = nil error, want error")
+	for name, err := range errs {
+		if err == nil {
+			t.Errorf("Set() with %s = nil error, want error", name)
+			continue
+		}
+		// The key names the app and the end user, and error text is logged more
+		// freely than the store's contents.
+		for _, part := range []string{key.AppName, key.UserID, key.Key} {
+			if strings.Contains(err.Error(), part) {
+				t.Errorf("Set() with %s: error %q contains the key field %q", name, err, part)
+			}
+		}
 	}
 }
 

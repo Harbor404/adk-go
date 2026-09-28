@@ -40,6 +40,9 @@ const ExpirySkew = 10 * time.Second
 
 // CredentialKey identifies a cached credential: the app, the acting user, and a
 // slot chosen by whatever produced the credential.
+//
+// It stays comparable, so a store may use it directly as a map key, as
+// [InMemoryCredentialStore] does.
 type CredentialKey struct {
 	// AppName is the ADK application name.
 	AppName string
@@ -56,16 +59,16 @@ type CredentialKey struct {
 	// Derive it from a collision-resistant digest of those inputs rather than by
 	// joining them, so that no delimiter appearing inside one of them can make
 	// two different sets encode alike. auth/gcp is the reference construction.
+	//
+	// The same warning applies to a store that flattens a CredentialKey into one
+	// identifier of its own — a row key, a filename, a cache line. AppName and
+	// UserID come off the request and ADK does not authenticate either, so
+	// joining the three fields on a separator lets {app "acme", user "bob|X"} and
+	// {app "acme|bob", user "X"} name one entry, and one end user is then served
+	// another's credential. Length-prefix or digest them, as auth/gcp does for
+	// the slot itself.
 	Key string
 }
-
-// The same warning applies to a store that flattens a CredentialKey into one
-// identifier of its own — a row key, a filename, a cache line. AppName and
-// UserID come off the request and ADK does not authenticate either, so joining
-// the three fields on a separator lets {app "acme", user "bob|X"} and
-// {app "acme|bob", user "X"} name one entry, and one end user is then served
-// another's credential. Length-prefix or digest them, as auth/gcp does for the
-// slot itself.
 
 // CredentialStore caches resolved credentials across calls, keyed by
 // [CredentialKey]. It exists so network-backed providers (e.g. auth/gcp) avoid a
@@ -99,6 +102,11 @@ type CredentialStore interface {
 	// Set stores cred for key until expiresAt, an absolute wall-clock time. Both
 	// arguments are required: a caller that cannot establish a lifetime must not
 	// cache, rather than cache forever.
+	//
+	// A non-zero expiresAt that is already past, or within [ExpirySkew] of now,
+	// is accepted and then never served. The store does not refuse it. Declining
+	// to write a spent credential is the producer's job, and the auth/gcp
+	// provider does it before calling Set.
 	//
 	// Wall clock, and not platform.Now, deliberately. That seam is scoped to one
 	// call tree so concurrent runs can hold independent clocks, and a credential's
@@ -190,10 +198,9 @@ func NewInMemoryCredentialStore() *InMemoryCredentialStore {
 
 // Get implements [CredentialStore].
 func (s *InMemoryCredentialStore) Get(_ context.Context, key CredentialKey) (Credential, bool, error) {
-	now := time.Now()
-
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	now := time.Now()
 	s.sweep(now)
 	e, ok := s.entries[key]
 	if !ok {

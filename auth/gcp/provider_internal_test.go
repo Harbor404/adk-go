@@ -25,6 +25,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"google.golang.org/adk/v2/auth"
 )
 
 // TestResolveClientBuildsDefaultClient drives the lazy ADC path end to end:
@@ -605,5 +607,36 @@ func TestNewClientSlotsAreUniqueUnderConcurrency(t *testing.T) {
 			t.Fatalf("cache slot %q was handed to two Clients", s)
 		}
 		seen[s] = true
+	}
+}
+
+// TestCacheUntilBoundary pins the caching floor at a fixed clock, equality
+// included. It is the complement of the store's expired test: exactly
+// auth.ExpirySkew left is too close to write, because the store would never
+// serve it.
+func TestCacheUntilBoundary(t *testing.T) {
+	now := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name      string
+		expiresAt time.Time
+		wantOK    bool
+		want      time.Time
+	}{
+		{"no expiry", time.Time{}, false, time.Time{}},
+		{"already past", now.Add(-time.Nanosecond), false, time.Time{}},
+		{"a nanosecond inside the margin", now.Add(auth.ExpirySkew - time.Nanosecond), false, time.Time{}},
+		{"exactly the margin", now.Add(auth.ExpirySkew), false, time.Time{}},
+		{"a nanosecond beyond the margin", now.Add(auth.ExpirySkew + time.Nanosecond), true, now.Add(auth.ExpirySkew + time.Nanosecond)},
+		{"exactly the cap", now.Add(maxCachedLifetime), true, now.Add(maxCachedLifetime)},
+		{"a nanosecond beyond the cap", now.Add(maxCachedLifetime + time.Nanosecond), true, now.Add(maxCachedLifetime)},
+		{"far future", time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC), true, now.Add(maxCachedLifetime)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := cacheUntil(now, tc.expiresAt)
+			if ok != tc.wantOK || !got.Equal(tc.want) {
+				t.Errorf("cacheUntil() = (%v, %v), want (%v, %v)", got, ok, tc.want, tc.wantOK)
+			}
+		})
 	}
 }

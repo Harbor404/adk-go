@@ -74,6 +74,12 @@ type ProviderConfig struct {
 	// otherwise. Building a Client per provider is therefore a way to get no
 	// sharing at all; see [Config.HTTPClient].
 	//
+	// A Client is identified per process, so a store shared across processes or
+	// replicas never serves one process's entry to another: each reads back only
+	// what it wrote. That discloses nothing and costs a round trip per process,
+	// but it also means a store backed by something shared buys no hits across
+	// replicas.
+	//
 	// The cost of caching is staleness. A credential revoked before it expires
 	// keeps being served until the cached entry does, which is the service's
 	// expiry or an hour, whichever comes first. To invalidate one sooner, pass
@@ -213,7 +219,9 @@ const maxCachedLifetime = time.Hour
 //
 // The components are length-prefixed before hashing, so no combination of
 // delimiters inside a scope or a URI can collide two different schemes. Sorting
-// the scopes makes the slot independent of the caller's ordering.
+// the scopes makes the slot independent of the caller's ordering. They are not
+// deduplicated, since that would assume the service treats ["a", "a"] and ["a"]
+// alike. The two slot apart, which costs a miss and never a wrong credential.
 //
 // There is no adk-python original to match. Python's credential service is not
 // on this provider's path at all: GcpAuthProviderScheme is a CustomAuthScheme,
@@ -309,7 +317,7 @@ func (p *provider) Credential(ctx context.Context) (auth.Credential, error) {
 		return nil, err
 	}
 
-	key := auth.CredentialKey{AppName: id.AppName, UserID: id.UserID, Key: cacheSlot(client, p.scheme)}
+	key := client.CacheKey(p.scheme, id)
 	// A store read error is non-fatal: fall through and fetch a fresh credential.
 	// A hit carrying no credential is a miss, though the interface forbids one:
 	// a third-party store is not worth failing closed over, and returning a nil
@@ -334,31 +342,46 @@ func (p *provider) Credential(ctx context.Context) (auth.Credential, error) {
 // cache stores r under key, best-effort: a store write failure must not fail
 // auth.
 //
-// Nothing is stored unless the service gave a lifetime with enough left to be
+// The write rides ctx and is not detached from it. It runs inline, before the
+// credential goes back to the request that fetched it, so a store backed by
+// something slow must stay bounded by that request: a request that ends first
+// costs the entry, and so one round trip later, rather than hanging on the
+// store.
+//
+// Wall clock, not platform.Now: what is being decided is when a real credential
+// stops working, which no simulated clock changes. [auth.CredentialStore.Set]
+// says the same of the value written here.
+func (p *provider) cache(ctx context.Context, key auth.CredentialKey, r *Retrieval) {
+	expiresAt, ok := cacheUntil(time.Now(), r.ExpiresAt)
+	if !ok {
+		return
+	}
+	_ = p.store.Set(ctx, key, r.Credential, expiresAt)
+}
+
+// cacheUntil reports the instant up to which a credential expiring at expiresAt
+// may be cached as of now, and whether it may be cached at all.
+//
+// Nothing is cached unless the service gave a lifetime with enough left to be
 // worth reading back. That single test covers four cases: the service reported
 // no expiry, meaning it cannot say when the token dies, so the credential cannot
 // be vouched for later; it reported an unparseable one, which reaches here as
 // the same zero time; it reported one already spent, which a store deriving a
 // TTL from it would turn into a negative one; or it reported one so close that
 // a store applying the standard margin would refuse to serve the entry the
-// moment it was written.
+// moment it was written. Exactly [auth.ExpirySkew] left counts as too close, the
+// same boundary the store applies when it reads.
 //
 // The far end is clamped rather than rejected, so a wildly distant expiry —
 // wrong, or injected — shortens to the cap instead of pinning the entry.
-//
-// Wall clock, not platform.Now: what is being decided is when a real credential
-// stops working, which no simulated clock changes. [auth.CredentialStore.Set]
-// says the same of the value written here.
-func (p *provider) cache(ctx context.Context, key auth.CredentialKey, r *Retrieval) {
-	now := time.Now()
-	if !r.ExpiresAt.After(now.Add(auth.ExpirySkew)) {
-		return
+func cacheUntil(now, expiresAt time.Time) (time.Time, bool) {
+	if !expiresAt.After(now.Add(auth.ExpirySkew)) {
+		return time.Time{}, false
 	}
-	expiresAt := r.ExpiresAt
 	if capped := now.Add(maxCachedLifetime); expiresAt.After(capped) {
-		expiresAt = capped
+		return capped, true
 	}
-	_ = p.store.Set(ctx, key, r.Credential, expiresAt)
+	return expiresAt, true
 }
 
 // resolveClient returns the configured client, building a default one (backed by

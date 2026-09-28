@@ -33,6 +33,7 @@ import (
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 
+	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/auth"
 )
 
@@ -304,19 +305,25 @@ func NewClient(ctx context.Context, cfg *Config) (*Client, error) {
 }
 
 // CacheKey returns the key a credential for scheme, retrieved through c on
-// behalf of userID under appName, is cached under — the key to hand
+// behalf of id, is cached under — the key to hand
 // [auth.CredentialStore.Delete] to invalidate that credential ahead of its
-// expiry, on a consent revocation or a logout.
+// expiry, on a consent revocation or a logout. It is the key the provider
+// itself files under, built from the same [agent.Identity] the provider reads
+// off the invocation. Only id.AppName and id.UserID take part: a credential
+// is shared across a user's sessions.
 //
-// Pass the same [ProviderScheme] value the provider was built with. A scheme
+// Pass the same [ProviderScheme] the provider was built with, as it was then.
+// [NewProvider] copies Scopes, so changing the caller's slice afterwards changes
+// the key this computes but not the one the provider files under. A scheme
 // differing in any field names a different entry, and Delete of a key nothing
 // is filed under succeeds silently, so a mistake here reads as "already gone".
 //
 // It is meaningful only to the process that produced c, and only for as long as
 // c is alive: a Client is one cache dimension, so rebuilding it strands whatever
-// the old one cached.
-func (c *Client) CacheKey(scheme ProviderScheme, appName, userID string) auth.CredentialKey {
-	return auth.CredentialKey{AppName: appName, UserID: userID, Key: cacheSlot(c, scheme)}
+// the old one cached. A Client that did not come from [NewClient] has no cache
+// dimension at all, names an entry nothing ever writes, and must not be used.
+func (c *Client) CacheKey(scheme ProviderScheme, id agent.Identity) auth.CredentialKey {
+	return auth.CredentialKey{AppName: id.AppName, UserID: id.UserID, Key: cacheSlot(c, scheme)}
 }
 
 // joinFields encodes fields as one unambiguous string, each prefixed with its

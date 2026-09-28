@@ -933,13 +933,46 @@ func TestProviderCachesCredential(t *testing.T) {
 
 	// Default (in-memory) store; two resolves for the same app+user+resource.
 	p := newProvider(t, e.Server, gcp.ProviderScheme{Name: testResource})
+	var got []string
 	for i := range 2 {
-		if _, err := p.Credential(adkContext(t, "user-1")); err != nil {
+		cred, err := p.Credential(adkContext(t, "user-1"))
+		if err != nil {
 			t.Fatalf("call %d: Credential() error = %v", i, err)
 		}
+		got = append(got, bearerToken(t, cred))
 	}
-	if got := e.calls(); got != 1 {
-		t.Errorf("service calls = %d, want 1 (second resolve should hit the cache)", got)
+	if n := e.calls(); n != 1 {
+		t.Fatalf("service calls = %d, want 1 (second resolve should hit the cache)", n)
+	}
+	e.requireServed(t, got...)
+}
+
+// bearerToken returns the token cred carries, failing t if it is not a bearer
+// credential.
+func bearerToken(t *testing.T, cred auth.Credential) string {
+	t.Helper()
+	bc, ok := cred.(auth.BearerCredential)
+	if !ok {
+		t.Fatalf("credential = %T, want auth.BearerCredential", cred)
+	}
+	return bc.Token
+}
+
+// requireServed fails t unless every token in got is the one e minted for its
+// only request. A cache hit is then pinned to what the miss fetched, not merely
+// to having avoided the service.
+func (e *echoServer) requireServed(t *testing.T, got ...string) {
+	t.Helper()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if len(e.requests) != 1 {
+		t.Fatalf("service requests = %d, want 1", len(e.requests))
+	}
+	want := e.requests[0].token()
+	for i, tok := range got {
+		if tok != want {
+			t.Errorf("resolve %d served %q, want the token the service minted, %q", i, tok, want)
+		}
 	}
 }
 
@@ -1035,15 +1068,19 @@ func TestProviderCacheHitsAcrossProviders(t *testing.T) {
 	store := auth.NewInMemoryCredentialStore()
 	clients := map[string]*gcp.Client{}
 	scheme := gcp.ProviderScheme{Name: testResource, Scopes: []string{"drive"}}
+	var got []string
 	for range 2 {
 		p := newSharingProvider(t, e, store, clients, "sa-alpha", scheme)
-		if _, err := p.Credential(adkContext(t, "user-1")); err != nil {
+		cred, err := p.Credential(adkContext(t, "user-1"))
+		if err != nil {
 			t.Fatalf("Credential() error = %v", err)
 		}
+		got = append(got, bearerToken(t, cred))
 	}
-	if got := e.calls(); got != 1 {
-		t.Errorf("service calls = %d, want 1 (a second provider with the same client and scheme should hit the entry)", got)
+	if n := e.calls(); n != 1 {
+		t.Fatalf("service calls = %d, want 1 (a second provider with the same client and scheme should hit the entry)", n)
 	}
+	e.requireServed(t, got...)
 }
 
 // Scope order is the caller's, not a cache dimension.
@@ -1051,15 +1088,19 @@ func TestProviderCacheIgnoresScopeOrder(t *testing.T) {
 	e := newEchoServer(t, "2999-01-01T00:00:00Z")
 	store := auth.NewInMemoryCredentialStore()
 	clients := map[string]*gcp.Client{}
+	var got []string
 	for _, scopes := range [][]string{{"a", "b"}, {"b", "a"}} {
 		p := newSharingProvider(t, e, store, clients, "sa-alpha", gcp.ProviderScheme{Name: testResource, Scopes: scopes})
-		if _, err := p.Credential(adkContext(t, "user-1")); err != nil {
+		cred, err := p.Credential(adkContext(t, "user-1"))
+		if err != nil {
 			t.Fatalf("Credential() error = %v", err)
 		}
+		got = append(got, bearerToken(t, cred))
 	}
-	if got := e.calls(); got != 1 {
-		t.Errorf("service calls = %d, want 1 (reordered scopes are the same credential)", got)
+	if n := e.calls(); n != 1 {
+		t.Fatalf("service calls = %d, want 1 (reordered scopes are the same credential)", n)
 	}
+	e.requireServed(t, got...)
 }
 
 // recordingStore reports every call and what it was handed, and can fail either
@@ -1076,9 +1117,14 @@ type recordingStore struct {
 	sets    int
 	gets    int
 	nilOnce bool // return a hit carrying no credential on the first Get
+	// hitWithErr reports whatever the inner store holds, hit included, alongside
+	// an error — the shape CredentialStore.Get forbids.
+	hitWithErr bool
 
 	lastKey     auth.CredentialKey
 	lastExpires time.Time
+	// setCancellable records whether the last Set could have been cancelled.
+	setCancellable bool
 }
 
 func (s *recordingStore) Get(ctx context.Context, key auth.CredentialKey) (auth.Credential, bool, error) {
@@ -1092,6 +1138,10 @@ func (s *recordingStore) Get(ctx context.Context, key auth.CredentialKey) (auth.
 		s.nilOnce = false
 		return nil, true, nil
 	}
+	if s.hitWithErr {
+		cred, ok, _ := s.inner.Get(ctx, key)
+		return cred, ok, errors.New("backend degraded")
+	}
 	return s.inner.Get(ctx, key)
 }
 
@@ -1100,10 +1150,18 @@ func (s *recordingStore) Set(ctx context.Context, key auth.CredentialKey, cred a
 	defer s.mu.Unlock()
 	s.sets++
 	s.lastKey, s.lastExpires = key, expiresAt
+	s.setCancellable = ctx.Done() != nil
 	if s.setErr != nil {
 		return s.setErr
 	}
 	return s.inner.Set(ctx, key, cred, expiresAt)
+}
+
+// failHits makes every later Get report its result alongside an error.
+func (s *recordingStore) failHits() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.hitWithErr = true
 }
 
 func (s *recordingStore) Delete(ctx context.Context, key auth.CredentialKey) error {
@@ -1161,6 +1219,50 @@ func TestProviderStoreDegradesRatherThanFails(t *testing.T) {
 	}
 }
 
+// A hit reported alongside an error is discarded and refetched, which is what
+// CredentialStore.Get tells callers to expect. The store is warmed first, so the
+// refetch is observable only if the credential really was dropped.
+func TestProviderDiscardsAHitReportedWithAnError(t *testing.T) {
+	e := newEchoServer(t, "2999-01-01T00:00:00Z")
+	store := &recordingStore{inner: auth.NewInMemoryCredentialStore()}
+	p := newStoreProvider(t, e, store)
+
+	if _, err := p.Credential(adkContext(t, "user-1")); err != nil {
+		t.Fatalf("warming Credential() error = %v", err)
+	}
+	store.failHits()
+	if _, err := p.Credential(adkContext(t, "user-1")); err != nil {
+		t.Fatalf("Credential() error = %v; a degraded store must not fail auth", err)
+	}
+	if got := e.calls(); got != 2 {
+		t.Errorf("service calls = %d, want 2 (a hit carrying an error must be refetched)", got)
+	}
+}
+
+// With Store unset, each provider gets a store of its own. Two providers that
+// share a Client and a scheme would share an entry through any common store, so
+// only a private one makes both reach the service.
+func TestProviderDefaultStoreIsPrivate(t *testing.T) {
+	e := newEchoServer(t, "2999-01-01T00:00:00Z")
+	client, err := gcp.NewClient(t.Context(), &gcp.Config{HTTPClient: e.Client(), AgentIdentityEndpoint: e.URL})
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	scheme := gcp.ProviderScheme{Name: testResource}
+	for range 2 {
+		p, err := gcp.NewProvider(t.Context(), gcp.ProviderConfig{Scheme: scheme, Client: client})
+		if err != nil {
+			t.Fatalf("NewProvider() error = %v", err)
+		}
+		if _, err := p.Credential(adkContext(t, "user-1")); err != nil {
+			t.Fatalf("Credential() error = %v", err)
+		}
+	}
+	if got := e.calls(); got != 2 {
+		t.Errorf("service calls = %d, want 2 (providers without a Store must not share one)", got)
+	}
+}
+
 // The configured store is written to, under a key whose app and user land in
 // their own fields.
 func TestProviderStoreWritesTheKeyItRead(t *testing.T) {
@@ -1184,6 +1286,10 @@ func TestProviderStoreWritesTheKeyItRead(t *testing.T) {
 	if store.lastKey.Key == "" {
 		t.Error("store key has an empty slot")
 	}
+	// The write runs on the request path, so it must stay bounded by the request.
+	if !store.setCancellable {
+		t.Error("Set() got a context the request cannot cancel, want the request's own")
+	}
 }
 
 // The key the provider writes under is the one Client.CacheKey names, so a
@@ -1204,7 +1310,9 @@ func TestClientCacheKeyMatchesWhatTheProviderWrote(t *testing.T) {
 		t.Fatalf("Credential() error = %v", err)
 	}
 
-	key := client.CacheKey(scheme, "app", "user-1")
+	// A session other than the one that resolved: the entry is per user, not per
+	// session.
+	key := client.CacheKey(scheme, agent.Identity{AppName: "app", UserID: "user-1", SessionID: "another-session"})
 	if _, ok, _ := store.Get(t.Context(), key); !ok {
 		t.Fatal("Client.CacheKey() names no cached entry, so a caller cannot invalidate one")
 	}
