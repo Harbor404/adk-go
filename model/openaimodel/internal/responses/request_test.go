@@ -517,7 +517,7 @@ func TestBuildParams_DropsReplayedThoughts(t *testing.T) {
 		},
 		{
 			// Dropping a thought-marked call would strand its response and
-			// fail the request in callTracker.
+			// fail the request in openaicommon.CallTracker.
 			name: "thought_marked_call_and_response_survive",
 			contents: []*genai.Content{
 				modelTurn(&genai.Part{
@@ -969,14 +969,15 @@ func TestReplayedReasoning(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := openaicommon.ReplayedReasoning(tt.part); got != tt.want {
-				t.Errorf("replayedReasoning() = %v, want %v", got, tt.want)
+				t.Errorf("ReplayedReasoning() = %v, want %v", got, tt.want)
 			}
 		})
 	}
 }
 
-// accountedForFields is the specification unsupportedPayload implements: the
-// genai.Part fields convertContents knows what to do with, and why.
+// accountedForFields is the specification openaicommon.UnsupportedPayload
+// implements: the genai.Part fields the request converters know what to do with,
+// and why.
 //
 // The list is deliberately restated here instead of derived from the
 // production code, so a field genai adds later is absent from it by
@@ -985,9 +986,9 @@ func TestReplayedReasoning(t *testing.T) {
 var accountedForFields = map[string]string{
 	"Text":             "sent, or dropped when it is reasoning",
 	"Thought":          "the marker deciding which",
-	"ThoughtSignature": "no Responses input item can carry one",
-	"FunctionCall":     "sent as a function_call item",
-	"FunctionResponse": "sent as a function_call_output item",
+	"ThoughtSignature": "no request field on either endpoint carries one",
+	"FunctionCall":     "sent as a call",
+	"FunctionResponse": "sent as the call's result",
 	"VideoMetadata":    "qualifies media carried in another field",
 	"MediaResolution":  "qualifies media carried in another field",
 	"PartMetadata":     "caller bookkeeping, never content",
@@ -1000,7 +1001,7 @@ func TestUnsupportedPayload_WalksEveryPartField(t *testing.T) {
 		t.Run(field.Name, func(t *testing.T) {
 			if !field.IsExported() {
 				t.Fatalf("genai.Part gained unexported field %s, which this walk cannot set; "+
-					"check by hand whether unsupportedPayload should report it", field.Name)
+					"check by hand whether UnsupportedPayload should report it", field.Name)
 			}
 			part := &genai.Part{}
 			reflect.ValueOf(part).Elem().Field(i).Set(nonZero(t, field.Type))
@@ -1008,13 +1009,13 @@ func TestUnsupportedPayload_WalksEveryPartField(t *testing.T) {
 			got := openaicommon.UnsupportedPayload(part)
 			if why, accounted := accountedForFields[field.Name]; accounted {
 				if got != "" {
-					t.Errorf("unsupportedPayload() = %q for a part carrying only %s, want %q: %s",
+					t.Errorf("UnsupportedPayload() = %q for a part carrying only %s, want %q: %s",
 						got, field.Name, "", why)
 				}
 				return
 			}
 			if got != field.Name {
-				t.Fatalf("unsupportedPayload() = %q for a part carrying only %s, want %q: "+
+				t.Fatalf("UnsupportedPayload() = %q for a part carrying only %s, want %q: "+
 					"a field the package cannot send must be reported, not dropped",
 					got, field.Name, field.Name)
 			}
@@ -1082,7 +1083,7 @@ func TestReplayedReasoning_EveryUnaccountedFieldDisqualifies(t *testing.T) {
 			part := &genai.Part{Thought: true, Text: "scratch"}
 			reflect.ValueOf(part).Elem().Field(i).Set(nonZero(t, field.Type))
 			if openaicommon.ReplayedReasoning(part) {
-				t.Errorf("replayedReasoning() = true for a thought carrying %s; "+
+				t.Errorf("ReplayedReasoning() = true for a thought carrying %s; "+
 					"it would be dropped instead of rejected as unsupported", field.Name)
 			}
 		})
@@ -2521,11 +2522,8 @@ func TestHTTPOptionsTimeoutReachesTheRequest(t *testing.T) {
 			defer close(release)
 
 			timeout := 100 * time.Millisecond
-			m, err := newTestModel(context.Background(), "gpt-4o-mini",
+			m := newTestModel("gpt-4o-mini",
 				&testClientConfig{APIKey: "test", BaseURL: srv.URL})
-			if err != nil {
-				t.Fatalf("newTestModel() error = %v", err)
-			}
 			req := &model.LLMRequest{
 				Contents: []*genai.Content{genai.NewContentFromText("hi", genai.RoleUser)},
 				Config:   &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{Timeout: &timeout}},
@@ -2636,10 +2634,7 @@ func assertReRangeable(t *testing.T, stream bool) {
 	defer srv.Close()
 
 	timeout := 30 * time.Second
-	m, err := newTestModel(context.Background(), "gpt-4o-mini", &testClientConfig{APIKey: "test", BaseURL: srv.URL})
-	if err != nil {
-		t.Fatalf("newTestModel() error = %v", err)
-	}
+	m := newTestModel("gpt-4o-mini", &testClientConfig{APIKey: "test", BaseURL: srv.URL})
 	req := &model.LLMRequest{
 		Contents: []*genai.Content{genai.NewContentFromText("hi", genai.RoleUser)},
 		Config:   &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{Timeout: &timeout}},

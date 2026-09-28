@@ -133,9 +133,9 @@ func MarshalFunctionArgs(args map[string]any) (string, error) {
 // per-request option would not, and on a streamed turn spans the consumer's
 // time in the range body.
 //
-// Non-positive is treated as unset here rather than trusted to
-// applyGenerationConfig having rejected it, since openai-go reads zero as no
-// deadline at all.
+// Non-positive is treated as unset here rather than trusted to the endpoint
+// packages' applyGenerationConfig having rejected it, since openai-go reads zero
+// as no deadline at all.
 func RequestTimeout(cfg *genai.GenerateContentConfig) time.Duration {
 	if cfg == nil || cfg.HTTPOptions == nil || cfg.HTTPOptions.Timeout == nil {
 		return 0

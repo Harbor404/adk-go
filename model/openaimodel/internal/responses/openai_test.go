@@ -15,7 +15,6 @@
 package responses
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -57,10 +56,7 @@ func TestModel_Generate(t *testing.T) {
 	}
 
 	ctx := t.Context()
-	llm, err := newTestModel(ctx, openai.ChatModelGPT4oMini, clientCfg)
-	if err != nil {
-		t.Fatalf("newTestModel() err = %v", err)
-	}
+	llm := newTestModel(openai.ChatModelGPT4oMini, clientCfg)
 	req := &model.LLMRequest{
 		Contents: []*genai.Content{genai.NewContentFromText("World?", genai.RoleUser)},
 	}
@@ -210,10 +206,7 @@ func TestModel_GenerateStream_Metadata(t *testing.T) {
 	}
 
 	ctx := t.Context()
-	llm, err := newTestModel(ctx, openai.ChatModelGPT4oMini, clientCfg)
-	if err != nil {
-		t.Fatalf("newTestModel() err = %v", err)
-	}
+	llm := newTestModel(openai.ChatModelGPT4oMini, clientCfg)
 	req := &model.LLMRequest{
 		Contents: []*genai.Content{genai.NewContentFromText("World?", genai.RoleUser)},
 	}
@@ -336,14 +329,11 @@ func runBlocking(t *testing.T, body string) ([]*model.LLMResponse, error) {
 func collectResponses(t *testing.T, server *httptest.Server, stream bool) ([]*model.LLMResponse, error) {
 	t.Helper()
 	ctx := t.Context()
-	llm, err := newTestModel(ctx, openai.ChatModelGPT4oMini, &testClientConfig{
+	llm := newTestModel(openai.ChatModelGPT4oMini, &testClientConfig{
 		APIKey:     "test",
 		BaseURL:    server.URL + "/v1",
 		HTTPClient: server.Client(),
 	})
-	if err != nil {
-		t.Fatalf("newTestModel() err = %v", err)
-	}
 	req := &model.LLMRequest{
 		Contents: []*genai.Content{genai.NewContentFromText("World?", genai.RoleUser)},
 	}
@@ -968,14 +958,11 @@ func TestModel_GenerateStream_StopsWhenTheConsumerStops(t *testing.T) {
 	client.Transport = spy
 
 	ctx := t.Context()
-	llm, err := newTestModel(ctx, openai.ChatModelGPT4oMini, &testClientConfig{
+	llm := newTestModel(openai.ChatModelGPT4oMini, &testClientConfig{
 		APIKey:     "test",
 		BaseURL:    server.URL + "/v1",
 		HTTPClient: client,
 	})
-	if err != nil {
-		t.Fatalf("newTestModel() err = %v", err)
-	}
 	req := &model.LLMRequest{
 		Contents: []*genai.Content{genai.NewContentFromText("World?", genai.RoleUser)},
 	}
@@ -2357,14 +2344,11 @@ func TestModel_GenerateContent_DoesNotSendReplayedReasoning(t *testing.T) {
 			defer server.Close()
 
 			ctx := t.Context()
-			llm, err := newTestModel(ctx, openai.ChatModelGPT4oMini, &testClientConfig{
+			llm := newTestModel(openai.ChatModelGPT4oMini, &testClientConfig{
 				APIKey:     "test",
 				BaseURL:    server.URL + "/v1",
 				HTTPClient: server.Client(),
 			})
-			if err != nil {
-				t.Fatalf("newTestModel() err = %v", err)
-			}
 			for _, err := range llm.GenerateContent(ctx, &model.LLMRequest{Contents: contents}, stream) {
 				if err != nil {
 					t.Fatalf("GenerateContent() err = %v", err)
@@ -2403,14 +2387,11 @@ func TestModel_GenerateContent_ThoughtOnlyRequestFailsBeforeSending(t *testing.T
 			defer server.Close()
 
 			ctx := t.Context()
-			llm, err := newTestModel(ctx, openai.ChatModelGPT4oMini, &testClientConfig{
+			llm := newTestModel(openai.ChatModelGPT4oMini, &testClientConfig{
 				APIKey:     "test",
 				BaseURL:    server.URL + "/v1",
 				HTTPClient: server.Client(),
 			})
-			if err != nil {
-				t.Fatalf("newTestModel() err = %v", err)
-			}
 			req := &model.LLMRequest{Contents: []*genai.Content{
 				{Role: string(genai.RoleModel), Parts: []*genai.Part{{Text: "still thinking", Thought: true}}},
 			}}
@@ -2431,34 +2412,21 @@ func TestModel_GenerateContent_ThoughtOnlyRequestFailsBeforeSending(t *testing.T
 	}
 }
 
-// testClientConfig mirrors the parent package's ClientConfig for the tests that
-// moved here with the code they exercise. The parent builds the client and
-// hands it to New; these tests do the same through this shim.
+// testClientConfig carries the ClientConfig fields these tests set. The parent
+// package builds the client and hands it to New; newTestModel does the same.
 type testClientConfig struct {
 	APIKey     string
 	BaseURL    string
 	HTTPClient *http.Client
-	Options    []option.RequestOption
 }
 
-func newTestModel(_ context.Context, modelName string, cfg *testClientConfig) (model.LLM, error) {
-	if modelName == "" {
-		return nil, openaicommon.ErrModelNameRequired
-	}
-	if cfg == nil {
-		cfg = &testClientConfig{}
-	}
-	var opts []option.RequestOption
-	if cfg.APIKey != "" {
-		opts = append(opts, option.WithAPIKey(cfg.APIKey))
-	}
-	if cfg.BaseURL != "" {
-		opts = append(opts, option.WithBaseURL(cfg.BaseURL))
-	}
+// newTestModel builds a Model from cfg. NewModel's own option handling is
+// tested in the parent package, through the constructor callers use.
+func newTestModel(modelName string, cfg *testClientConfig) model.LLM {
+	opts := []option.RequestOption{option.WithAPIKey(cfg.APIKey), option.WithBaseURL(cfg.BaseURL)}
 	if cfg.HTTPClient != nil {
 		opts = append(opts, option.WithHTTPClient(cfg.HTTPClient))
 	}
-	opts = append(opts, cfg.Options...)
 	client := openai.NewClient(opts...)
-	return New(&client, modelName), nil
+	return New(&client, modelName)
 }

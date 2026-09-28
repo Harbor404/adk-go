@@ -17,6 +17,7 @@ package openaimodel
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -24,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/openai/openai-go/v3/option"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/model"
@@ -156,8 +158,8 @@ func TestHTTPOptionsHeadersNeverReachTheWire(t *testing.T) {
 				var got http.Header
 				server := newLoopbackServer(t, func(w http.ResponseWriter, r *http.Request) {
 					got = r.Header.Clone()
-					// A 400 is not retried, so the one request is the one checked.
-					w.WriteHeader(http.StatusBadRequest)
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = fmt.Fprint(w, completedBodies[api])
 				})
 				llm, err := NewModel(t.Context(), "gpt-4o-mini", &ClientConfig{
 					APIKey:     "real-key",
@@ -183,8 +185,11 @@ func TestHTTPOptionsHeadersNeverReachTheWire(t *testing.T) {
 						},
 					}},
 				}
-				// The call fails by design; only the headers the server saw matter.
-				for range llm.GenerateContent(t.Context(), req, stream) {
+				// A streamed call fails on the JSON body; only its headers matter.
+				for _, err := range llm.GenerateContent(t.Context(), req, stream) {
+					if err != nil && !stream {
+						t.Fatalf("GenerateContent() err = %v", err)
+					}
 				}
 				if got == nil {
 					t.Fatal("no request reached the server")
@@ -202,6 +207,68 @@ func TestHTTPOptionsHeadersNeverReachTheWire(t *testing.T) {
 		}
 	}
 }
+
+// completedBodies holds a minimal completed blocking response per API.
+var completedBodies = map[API]string{
+	APIResponses: `{"id":"r","object":"response","status":"completed",` +
+		`"output":[{"type":"message","id":"m","role":"assistant","status":"completed",` +
+		`"content":[{"type":"output_text","text":"hi","annotations":[]}]}]}`,
+	APIChatCompletions: `{"id":"c","object":"chat.completion","model":"m",` +
+		`"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"hi"}}]}`,
+}
+
+// TestNewModel_UsesTheConfiguredClient pins that NewModel hands
+// ClientConfig.HTTPClient and ClientConfig.Options to the SDK. The configured
+// client answers in memory, while BaseURL points at a server that fails every
+// request, so a model built on the default client gets the failure instead.
+func TestNewModel_UsesTheConfiguredClient(t *testing.T) {
+	for _, api := range []API{APIResponses, APIChatCompletions} {
+		t.Run(string(api), func(t *testing.T) {
+			server := newLoopbackServer(t, func(w http.ResponseWriter, _ *http.Request) {
+				// Not a status the SDK retries.
+				w.WriteHeader(http.StatusTeapot)
+			})
+			used := false
+			var optionHeader string
+			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				used = true
+				optionHeader = r.Header.Get("X-Adk-Option")
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(completedBodies[api])),
+					Request:    r,
+				}, nil
+			})}
+			llm, err := NewModel(t.Context(), "gpt-4o-mini", &ClientConfig{
+				APIKey:     "test",
+				BaseURL:    server.URL + "/v1",
+				HTTPClient: client,
+				Options:    []option.RequestOption{option.WithHeader("X-Adk-Option", "set")},
+				API:        api,
+			})
+			if err != nil {
+				t.Fatalf("NewModel() err = %v", err)
+			}
+			req := &model.LLMRequest{Contents: []*genai.Content{genai.NewContentFromText("hi", genai.RoleUser)}}
+			for _, err := range llm.GenerateContent(t.Context(), req, false) {
+				if err != nil {
+					t.Fatalf("GenerateContent() err = %v", err)
+				}
+			}
+			if !used {
+				t.Error("the request did not go through ClientConfig.HTTPClient")
+			}
+			if optionHeader != "set" {
+				t.Errorf("X-Adk-Option = %q, want the header ClientConfig.Options set", optionHeader)
+			}
+		})
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 // newLoopbackServer serves handler on IPv4 loopback, which the sandboxes these
 // tests run in allow where the default listener's IPv6 may be refused.

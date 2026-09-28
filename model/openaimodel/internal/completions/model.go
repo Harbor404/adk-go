@@ -33,8 +33,8 @@ import (
 )
 
 // Model talks to the Chat Completions API, the surface OpenAI-compatible
-// third-party providers implement. It is what [NewModel] returns for a
-// [ClientConfig] whose API is [APIChatCompletions].
+// third-party providers implement. It is what openaimodel.NewModel returns for
+// a ClientConfig whose API is openaimodel.APIChatCompletions.
 type Model struct {
 	client *openai.Client
 	name   string

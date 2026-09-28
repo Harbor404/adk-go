@@ -272,10 +272,11 @@ func TestNormalizeSchema(t *testing.T) {
 	}
 }
 
-// RequestTimeout must be safe on its own terms. applyGenerationConfig rejects a
-// non-positive timeout before any request is built, so this guard is defense in
-// depth — and it is tested directly rather than assumed unreachable, because a
-// guard that only holds while callers keep the right order is not a guard.
+// RequestTimeout must be safe on its own terms. Each endpoint package's
+// applyGenerationConfig rejects a non-positive timeout before any request is
+// built, so this guard is defense in depth — and it is tested directly rather
+// than assumed unreachable, because a guard that only holds while callers keep
+// the right order is not a guard.
 func TestRequestTimeoutGuardsNonPositiveItself(t *testing.T) {
 	for _, d := range []time.Duration{0, -time.Second} {
 		timeout := d
