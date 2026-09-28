@@ -55,10 +55,12 @@
 // is not configurable, so tool call arguments are best effort rather than
 // guaranteed to match the declared parameter schema.
 //
-// Model reasoning is reported to the caller as thought parts, but it is not
-// sent back on a later turn: the Responses API accepts reasoning only as an
-// input item referencing the id of the item that produced it, and ADK does not
-// carry those ids. Reasoning therefore informs the turn that produced it and no
+// On the Responses API, model reasoning is reported to the caller as thought
+// parts; Chat Completions responses are read for text, refusals and tool calls
+// only. Reasoning is not sent back on a later turn to either API: the
+// Responses API accepts it only as an input item referencing the id of the
+// item that produced it, which ADK does not carry, and Chat Completions has no
+// field for it. Reasoning therefore informs the turn that produced it and no
 // other; a caller that needs a conclusion to survive should have the model
 // state it in the answer. What this package cannot police is reasoning that
 // something upstream has already rendered as ordinary text: a peer agent's
@@ -82,4 +84,8 @@
 //		BaseURL: "https://api.deepseek.com/v1",
 //		API:     openaimodel.APIChatCompletions,
 //	}
+//
+// Make sure APIKey is non-empty when BaseURL points at another provider. The
+// OpenAI client falls back to the OPENAI_API_KEY environment variable when it
+// is empty, and would send that key to BaseURL.
 package openaimodel

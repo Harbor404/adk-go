@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
+	"slices"
 	"strings"
 	"testing"
 
@@ -228,8 +229,8 @@ func TestBuildChatParams_UnknownToolResultIDRejected(t *testing.T) {
 	}
 }
 
-// TestBuildChatParams_ThoughtsNotReplayed pins the deliberate divergence from
-// the Responses path, which replays prior-turn reasoning as assistant text.
+// TestBuildChatParams_ThoughtsNotReplayed pins that prior-turn reasoning is
+// dropped rather than sent back as assistant text, as on the Responses path.
 func TestBuildChatParams_ThoughtsNotReplayed(t *testing.T) {
 	wire := chatWire(t, &model.LLMRequest{Contents: []*genai.Content{
 		{Role: "model", Parts: []*genai.Part{
@@ -269,10 +270,129 @@ func TestBuildChatParams_NilRequest(t *testing.T) {
 	}
 }
 
+// TestBuildChatParams_UnsupportedPart pins that a payload this endpoint cannot
+// send is rejected by name, including when text on the same part would
+// otherwise have carried the request out without it.
 func TestBuildChatParams_UnsupportedPart(t *testing.T) {
-	_, err := buildChatParams("m", userReq(&genai.Part{InlineData: &genai.Blob{MIMEType: "image/png"}}))
-	if err == nil || !strings.Contains(err.Error(), "unsupported content part") {
-		t.Fatalf("err = %v, want an unsupported-part error", err)
+	for _, tt := range []struct {
+		name    string
+		part    *genai.Part
+		wantErr string
+	}{
+		{
+			name:    "inline data alone",
+			part:    &genai.Part{InlineData: &genai.Blob{MIMEType: "image/png"}},
+			wantErr: "unsupported content part: InlineData",
+		},
+		{
+			name:    "inline data beside text",
+			part:    &genai.Part{Text: "what is this?", InlineData: &genai.Blob{MIMEType: "image/png"}},
+			wantErr: "unsupported content part: InlineData",
+		},
+		{
+			name:    "file data beside a thought",
+			part:    &genai.Part{Thought: true, FileData: &genai.FileData{FileURI: "gs://b/o"}},
+			wantErr: "unsupported content part: FileData",
+		},
+		{
+			name:    "empty part",
+			part:    &genai.Part{},
+			wantErr: "unsupported content part: carries nothing to send",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := buildChatParams("m", userReq(tt.part))
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("err = %v, want one containing %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestBuildChatParams_PartFieldsReadIndependently pins that a call on a part
+// also carrying text or the thought marker is still sent, rather than lost to
+// whichever field matched first.
+func TestBuildChatParams_PartFieldsReadIndependently(t *testing.T) {
+	call := &genai.FunctionCall{ID: "call_1", Name: "get_weather", Args: map[string]any{"city": "Lisbon"}}
+	result := &genai.Content{Role: "user", Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{
+		ID: "call_1", Name: "get_weather", Response: map[string]any{"c": -7},
+	}}}}
+	for _, tt := range []struct {
+		name        string
+		part        *genai.Part
+		wantContent any
+	}{
+		{name: "text and call", part: &genai.Part{Text: "let me check", FunctionCall: call}, wantContent: "let me check"},
+		{name: "thought text and call", part: &genai.Part{Text: "scratch", Thought: true, FunctionCall: call}, wantContent: nil},
+		{name: "signed call", part: &genai.Part{FunctionCall: call, ThoughtSignature: []byte("sig")}, wantContent: nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			msgs := chatMessages(t, chatWire(t, &model.LLMRequest{Contents: []*genai.Content{
+				{Role: "model", Parts: []*genai.Part{tt.part}},
+				result,
+			}}))
+			if len(msgs) != 2 {
+				t.Fatalf("messages = %d, want the assistant turn and its tool result", len(msgs))
+			}
+			if got := msgs[0]["content"]; got != tt.wantContent {
+				t.Errorf("content = %#v, want %#v", got, tt.wantContent)
+			}
+			calls, _ := msgs[0]["tool_calls"].([]any)
+			if len(calls) != 1 {
+				t.Fatalf("tool_calls = %#v, want the call", msgs[0]["tool_calls"])
+			}
+			if id := calls[0].(map[string]any)["id"]; id != "call_1" {
+				t.Errorf("tool call id = %v, want call_1", id)
+			}
+			if msgs[1]["tool_call_id"] != "call_1" {
+				t.Errorf("tool result = %#v, want it paired with call_1", msgs[1])
+			}
+		})
+	}
+}
+
+// TestBuildChatParams_SignatureOnlyPartDropped covers the part a Gemini
+// thinking model leaves in shared history holding nothing but its signature,
+// which Chat Completions has no field for.
+func TestBuildChatParams_SignatureOnlyPartDropped(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		parts []*genai.Part
+		want  []string
+	}{
+		{name: "after text", parts: []*genai.Part{{Text: "sunny"}, {ThoughtSignature: []byte("sig")}}, want: []string{"user", "assistant"}},
+		{name: "marked as a thought", parts: []*genai.Part{{Thought: true, ThoughtSignature: []byte("sig")}}, want: []string{"user"}},
+		{name: "alone", parts: []*genai.Part{{ThoughtSignature: []byte("sig")}}, want: []string{"user"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			msgs := chatMessages(t, chatWire(t, &model.LLMRequest{Contents: []*genai.Content{
+				{Role: "user", Parts: []*genai.Part{{Text: "weather?"}}},
+				{Role: "model", Parts: tt.parts},
+			}}))
+			var roles []string
+			for _, msg := range msgs {
+				roles = append(roles, msg["role"].(string))
+			}
+			if !slices.Equal(roles, tt.want) {
+				t.Errorf("roles = %v, want %v", roles, tt.want)
+			}
+		})
+	}
+}
+
+// TestBuildChatParams_CallOutsideModelTurnRejected pins that a call only an
+// assistant message could carry fails by name, rather than going missing and
+// leaving its result to point at a call the request never declared.
+func TestBuildChatParams_CallOutsideModelTurnRejected(t *testing.T) {
+	for _, role := range []string{"user", "system", "developer"} {
+		t.Run(role, func(t *testing.T) {
+			_, err := buildChatParams("m", &model.LLMRequest{Contents: []*genai.Content{
+				{Role: role, Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "call_1", Name: "get_weather"}}}},
+			}})
+			if err == nil || !strings.Contains(err.Error(), "function call in a "+role+" turn") {
+				t.Fatalf("err = %v, want one naming the misplaced call", err)
+			}
+		})
 	}
 }
 
@@ -419,6 +539,29 @@ func TestApplyChatGenerationConfig_ResponseFormat(t *testing.T) {
 			t.Errorf("json_schema = %#v, want name answer and strict true", schema)
 		}
 		body := schema["schema"].(map[string]any)
+		if body["additionalProperties"] != false {
+			t.Error("strict rewriting did not run on the schema")
+		}
+	})
+
+	t.Run("response json schema", func(t *testing.T) {
+		wire := chatWire(t, &model.LLMRequest{
+			Contents: []*genai.Content{{Role: "user", Parts: []*genai.Part{{Text: "hi"}}}},
+			Config: &genai.GenerateContentConfig{ResponseJsonSchema: map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"city": map[string]any{"type": "string"}},
+			}},
+		})
+		format := wire["response_format"].(map[string]any)
+		schema := format["json_schema"].(map[string]any)
+		if schema["name"] != "adk_response" || schema["strict"] != true {
+			t.Errorf("json_schema = %#v, want the default name and strict true", schema)
+		}
+		body := schema["schema"].(map[string]any)
+		props, _ := body["properties"].(map[string]any)
+		if _, ok := props["city"]; !ok {
+			t.Errorf("schema = %#v, want the caller's city property", body)
+		}
 		if body["additionalProperties"] != false {
 			t.Error("strict rewriting did not run on the schema")
 		}

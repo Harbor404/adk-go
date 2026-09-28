@@ -384,6 +384,110 @@ func TestChatModel_GenerateStream_EmptySnapshotKeepsStreamedText(t *testing.T) {
 	}
 }
 
+// TestChatModel_GenerateStream_ChunkIDsDiffer covers a provider that gives each
+// chunk of one stream its own id. The accumulator refuses a chunk whose id is
+// not the first one's, which would lose the call's arguments, or the call.
+func TestChatModel_GenerateStream_ChunkIDsDiffer(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		frames   []string
+		wantText string
+		wantID   string
+	}{
+		{
+			name: "arguments under changing ids",
+			frames: []string{
+				`{"id":"a1","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":""}}]}}]}`,
+				`{"id":"a2","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"city\":"}}]}}]}`,
+				`{"id":"a3","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"Paris\"}"}}]}}]}`,
+				`{"id":"a4","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+			},
+			wantID: "a1",
+		},
+		{
+			// Opens with a chunk that has no id, so the id to keep is the first
+			// non-empty one rather than the first one.
+			name: "text then a call under a new id",
+			frames: []string{
+				`{"id":"","object":"chat.completion.chunk","model":"m","choices":[]}`,
+				`{"id":"a1","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"looking"}}]}`,
+				`{"id":"a2","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Paris\"}"}}]}}]}`,
+				`{"id":"a3","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+			},
+			wantText: "looking",
+			wantID:   "a1",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			rig := newChatRig(t, chatSSE(tt.frames...))
+			got, err := askChat(t, rig.model(t), true)
+			if err != nil {
+				t.Fatalf("GenerateContent() err = %v", err)
+			}
+			final := got[len(got)-1]
+			if text := responseText(final); text != tt.wantText {
+				t.Errorf("final text = %q, want %q", text, tt.wantText)
+			}
+			if id := final.CustomMetadata["openai_response_id"]; id != tt.wantID {
+				t.Errorf("response id = %v, want %q from the first non-empty chunk id", id, tt.wantID)
+			}
+			call := onlyCall(t, final)
+			if call.ID != "call_1" || call.Args["city"] != "Paris" {
+				t.Errorf("call = %#v, want call_1 with city Paris", call)
+			}
+			if final.FinishReason != genai.FinishReasonStop {
+				t.Errorf("finish reason = %v, want STOP", final.FinishReason)
+			}
+		})
+	}
+}
+
+// TestChatModel_GenerateStream_RejectedToolCallChunkFails pins that a tool-call
+// delta the accumulator refuses fails the turn, since only the snapshot states
+// the calls and dropping one would pass the turn off as whole.
+func TestChatModel_GenerateStream_RejectedToolCallChunkFails(t *testing.T) {
+	rig := newChatRig(t, chatSSE(
+		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"looking"}}]}`,
+		// A tool-call index this far ahead grows the choice past the bound the
+		// accumulator allows in one step.
+		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":1000,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{}"}}]}}]}`,
+		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+	))
+	got, err := askChat(t, rig.model(t), true)
+	if !errors.Is(err, errToolCallChunkRejected) {
+		t.Fatalf("err = %v, want %v", err, errToolCallChunkRejected)
+	}
+	for _, resp := range got {
+		if resp.TurnComplete {
+			t.Errorf("a response closed the turn without its call: %#v", resp.Content)
+		}
+	}
+}
+
+// TestChatModel_GenerateStream_UnsupersededSnapshotKeepsCalls covers a snapshot
+// whose text cannot replace the streamed text, because the refusal and content
+// deltas interleaved. The streamed text stands, but the calls exist only in the
+// snapshot, so they must still reach the final response.
+func TestChatModel_GenerateStream_UnsupersededSnapshotKeepsCalls(t *testing.T) {
+	rig := newChatRig(t, chatSSE(
+		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","refusal":"no"}}]}`,
+		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"x"}}]}`,
+		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Lisbon\"}"}}]}}]}`,
+		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+	))
+	got, err := askChat(t, rig.model(t), true)
+	if err != nil {
+		t.Fatalf("GenerateContent() err = %v", err)
+	}
+	final := got[len(got)-1]
+	if text := responseText(final); text != "nox" {
+		t.Errorf("final text = %q, want the streamed text", text)
+	}
+	if call := onlyCall(t, final); call.ID != "call_1" || call.Args["city"] != "Lisbon" {
+		t.Errorf("call = %#v, want call_1 with city Lisbon", call)
+	}
+}
+
 func TestChatModel_GenerateStream_ErrorMidStream(t *testing.T) {
 	rig := newChatRig(t, chatSSE(
 		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"hail "}}]}`,
