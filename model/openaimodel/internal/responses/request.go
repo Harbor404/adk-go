@@ -18,7 +18,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"reflect"
 	"strings"
 
 	"github.com/openai/openai-go/v3/packages/param"
@@ -142,7 +141,7 @@ func convertContents(contents []*genai.Content) (responses.ResponseInputParam, b
 			// Reported before anything is emitted, so that a field this
 			// package cannot send is named even when text or a call rides on
 			// the same part and would otherwise have carried it out unnoticed.
-			if field := unsupportedPayload(part); field != "" {
+			if field := openaicommon.UnsupportedPayload(part); field != "" {
 				return nil, false, fmt.Errorf("openai: unsupported content part: %s", field)
 			}
 			// Text is read independently of a call or a response because one
@@ -152,7 +151,7 @@ func convertContents(contents []*genai.Content) (responses.ResponseInputParam, b
 			switch {
 			case sendText:
 				textParts = append(textParts, part.Text)
-			case part.Text != "" || replayedReasoning(part):
+			case part.Text != "" || openaicommon.ReplayedReasoning(part):
 				// Dropping reasoning must not hide a bad role, so the check
 				// still runs. The drop counts toward the emptied-request
 				// report only when it suppressed text the model would
@@ -185,7 +184,7 @@ func convertContents(contents []*genai.Content) (responses.ResponseInputParam, b
 					return nil, false, err
 				}
 				items = append(items, responses.ResponseInputItemUnionParam{OfFunctionCallOutput: respParam})
-			case !sendText && !replayedReasoning(part):
+			case !sendText && !openaicommon.ReplayedReasoning(part):
 				// Nothing in the part reaches the request. It keeps the
 				// unsupported-content-part prefix the single message used
 				// before, so a caller matching on that still matches here.
@@ -199,63 +198,6 @@ func convertContents(contents []*genai.Content) (responses.ResponseInputParam, b
 	}
 
 	return items, droppedReasoning, nil
-}
-
-// replayedReasoning reports whether part is reasoning carried over from an
-// earlier turn that carries nothing else, so dropping it loses nothing: the
-// Responses API accepts reasoning back only as an input item referencing the
-// id that produced it, an id ADK does not carry, so sent as assistant text it
-// would read as words the model never said.
-//
-// Whether to send a part's text is decided by part.Thought alone, because a
-// part can carry both reasoning text and a call, and the call must survive.
-func replayedReasoning(part *genai.Part) bool {
-	if part == nil {
-		return false
-	}
-	// A signature can arrive on a part of its own with the marker unset; there
-	// is nowhere to put it in a Responses request either way.
-	if !part.Thought && len(part.ThoughtSignature) == 0 {
-		return false
-	}
-	// Text on a part not marked as a thought is an answer, signature or not.
-	if part.Text != "" && !part.Thought {
-		return false
-	}
-	// Marking a call or anything else as a thought must not make it vanish.
-	return part.FunctionCall == nil && part.FunctionResponse == nil &&
-		unsupportedPayload(part) == ""
-}
-
-// unsupportedPayload names the first field on part that this package has no way
-// to send, or "" when the part holds nothing beyond what convertContents
-// accounts for.
-//
-// The test is stated as the absence of anything unaccounted for rather than as
-// a list of the fields that disqualify a part, so that a field added to
-// genai.Part by a later release is reported here by default instead of leaving
-// the request unnoticed.
-func unsupportedPayload(part *genai.Part) string {
-	if part == nil {
-		return ""
-	}
-	rest := *part
-	rest.Text = ""              // sent, or dropped when it is reasoning
-	rest.Thought = false        // the marker deciding which
-	rest.ThoughtSignature = nil // no Responses input item can carry one
-	rest.FunctionCall = nil     // sent as a function_call item
-	rest.FunctionResponse = nil // sent as a function_call_output item
-	rest.VideoMetadata = nil    // qualifies media carried in another field
-	rest.MediaResolution = nil  // likewise
-	rest.PartMetadata = nil     // caller bookkeeping, never content
-
-	v := reflect.ValueOf(rest)
-	for i := range v.NumField() {
-		if !v.Field(i).IsZero() {
-			return v.Type().Field(i).Name
-		}
-	}
-	return ""
 }
 
 // newMessage builds an easy input message for an already-normalized role.

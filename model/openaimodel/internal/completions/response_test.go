@@ -158,6 +158,68 @@ func TestConvertCompletion_EmptyToolArguments(t *testing.T) {
 	}
 }
 
+// TestConvertCompletion_UnusableToolCalls pins that no call reaches the
+// caller without a function name: stored in the session, a nameless call fails
+// every later request with openaicommon.ErrFunctionCallMissingName.
+func TestConvertCompletion_UnusableToolCalls(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		call    string
+		wantErr error
+	}{
+		{
+			name:    "custom tool call",
+			call:    `{"id":"call_9","type":"custom","custom":{"name":"grep","input":"x"}}`,
+			wantErr: openaicommon.ErrUnsupportedOutputItemType,
+		},
+		{
+			name:    "function call without a name",
+			call:    `{"id":"call_9","type":"function","function":{"name":"","arguments":"{}"}}`,
+			wantErr: openaicommon.ErrFunctionCallMissingName,
+		},
+		// Either an id or arguments shows a call was made, so neither alone is
+		// read as a padded index.
+		{
+			name:    "arguments without a name or id",
+			call:    `{"id":"","type":"function","function":{"name":"","arguments":"{\"city\":\"Lisbon\"}"}}`,
+			wantErr: openaicommon.ErrFunctionCallMissingName,
+		},
+		{
+			name:    "id without a name or arguments",
+			call:    `{"id":"call_9","type":"function","function":{"name":"","arguments":""}}`,
+			wantErr: openaicommon.ErrFunctionCallMissingName,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := decodeCompletion(t, `{"id":"c","model":"m","choices":[{"index":0,"finish_reason":"tool_calls",
+				"message":{"role":"assistant","tool_calls":[`+tt.call+`]}}]}`)
+			_, err := convertCompletion(resp)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("err = %v, want %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestConvertCompletion_SkipsPaddedToolCall covers the empty entry the
+// accumulator leaves at a tool-call index a stream skipped. No call was made
+// there, so it is dropped rather than returned as a nameless call.
+func TestConvertCompletion_SkipsPaddedToolCall(t *testing.T) {
+	resp := decodeCompletion(t, `{"id":"c","model":"m","choices":[{"index":0,"finish_reason":"tool_calls",
+		"message":{"role":"assistant","tool_calls":[
+			{"id":"","type":"","function":{"name":"","arguments":""}},
+			{"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{}"}}
+		]}}]}`)
+	got, err := convertCompletion(resp)
+	if err != nil {
+		t.Fatalf("convertCompletion() err = %v", err)
+	}
+	parts := got.Candidates[0].Content.Parts
+	if len(parts) != 1 || parts[0].FunctionCall == nil || parts[0].FunctionCall.ID != "call_1" {
+		t.Fatalf("parts = %#v, want only the call_1 call", parts)
+	}
+}
+
 func TestConvertCompletion_UnparseableToolArguments(t *testing.T) {
 	resp := decodeCompletion(t, `{
 		"id":"c","model":"m","choices":[{"index":0,"finish_reason":"tool_calls","message":{

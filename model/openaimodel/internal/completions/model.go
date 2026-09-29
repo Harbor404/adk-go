@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"slices"
 	"time"
 
 	"github.com/openai/openai-go/v3"
@@ -107,7 +108,11 @@ func (m *Model) generateStream(ctx context.Context, params openai.ChatCompletion
 		translator := newStreamTranslator()
 
 		for stream.Next() {
-			genaiResp := translator.process(stream.Current())
+			genaiResp, err := translator.process(stream.Current())
+			if err != nil {
+				yield(nil, err)
+				return
+			}
 			if genaiResp == nil {
 				continue
 			}
@@ -136,9 +141,17 @@ func (m *Model) generateStream(ctx context.Context, params openai.ChatCompletion
 			final = converters.Genai2LLMResponse(genaiResp)
 		case err == nil:
 			// Only the snapshot states the turn's tool calls, so it replaces the
-			// aggregate whenever it retains everything already streamed.
-			if content := genaiResp.Candidates[0].Content; openaicommon.CompletedContentSupersedes(final.Content, content) {
+			// aggregate whenever it retains everything already streamed, and
+			// otherwise the streamed text stands with the snapshot's calls added.
+			content := genaiResp.Candidates[0].Content
+			if openaicommon.CompletedContentSupersedes(final.Content, content) {
 				final.Content = content
+			} else {
+				kept, _, _ := openaicommon.PartsWithoutCalls(final.Content)
+				final.Content = &genai.Content{
+					Role:  final.Content.Role,
+					Parts: slices.Concat(kept, functionCallParts(content)),
+				}
 			}
 		case openaicommon.CarriesContent(final) && openaicommon.IsEmptyOutput(err):
 			// The snapshot holds nothing but the deltas produced a turn, so
@@ -156,6 +169,17 @@ func (m *Model) generateStream(ctx context.Context, params openai.ChatCompletion
 		finalizeStreamResponse(final, completion, translator.usage)
 		yield(final, nil)
 	}
+}
+
+// functionCallParts returns the parts of content that carry a function call.
+func functionCallParts(content *genai.Content) []*genai.Part {
+	var calls []*genai.Part
+	for _, part := range content.Parts {
+		if part != nil && part.FunctionCall != nil {
+			calls = append(calls, part)
+		}
+	}
+	return calls
 }
 
 // finalizeStreamResponse closes out a streamed turn. Deltas carry no finish

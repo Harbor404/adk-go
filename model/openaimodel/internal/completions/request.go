@@ -16,6 +16,7 @@ package completions
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -125,16 +126,22 @@ func convertContent(content *genai.Content, tracker *openaicommon.CallTracker) (
 		calls    []openai.ChatCompletionMessageToolCallUnionParam
 	)
 	for _, part := range content.Parts {
-		switch {
-		case part == nil:
+		if part == nil {
 			continue
-		case part.Thought:
-			// Chat Completions has no field for prior-turn reasoning, and
-			// replaying it as assistant text would hand the model its own
-			// scratchpad back as an answer.
-			continue
-		case part.Text != "":
+		}
+		// Checked first, so a field this package cannot send is named even when
+		// text or a call on the same part would otherwise carry it out unnoticed.
+		if field := openaicommon.UnsupportedPayload(part); field != "" {
+			return nil, fmt.Errorf("openai: unsupported content part: %s", field)
+		}
+		// Text is read apart from a call or a response because one part can
+		// carry both. Reasoning and signatures are dropped, as on the Responses
+		// path: Chat Completions has no field for either.
+		sendText := part.Text != "" && !part.Thought
+		if sendText {
 			texts = append(texts, part.Text)
+		}
+		switch {
 		case part.FunctionCall != nil:
 			call, err := newToolCall(tracker, part.FunctionCall)
 			if err != nil {
@@ -147,9 +154,14 @@ func convertContent(content *genai.Content, tracker *openaicommon.CallTracker) (
 				return nil, err
 			}
 			messages = append(messages, *msg)
-		default:
-			return nil, fmt.Errorf("openai: unsupported content part %T", part)
+		case !sendText && !openaicommon.ReplayedReasoning(part):
+			return nil, errors.New("openai: unsupported content part: carries nothing to send")
 		}
+	}
+	if len(calls) > 0 && role != roleAssistant {
+		// Only an assistant message carries tool calls, and dropping them would
+		// leave their results answering calls the request never made.
+		return nil, fmt.Errorf("openai: function call in a %s turn: only model turns can carry calls", role)
 	}
 
 	text := joinText(texts)

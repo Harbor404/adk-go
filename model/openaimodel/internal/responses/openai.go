@@ -268,7 +268,7 @@ func adoptTerminalCalls(final *model.LLMResponse, term terminalEvent) error {
 		// Naming no calls says nothing about them: what streamed stands.
 		return nil
 	}
-	kept, streamedCalls, at := partsWithoutCalls(final.Content)
+	kept, streamedCalls, at := openaicommon.PartsWithoutCalls(final.Content)
 	if term.incomplete && len(items) < len(streamedCalls) {
 		// Only a completed response states the turn's whole output. A shorter
 		// list on an incomplete one is the truncation showing, so replacing
@@ -455,34 +455,6 @@ func restoreUnstated(part *genai.Part, streamed *genai.FunctionCall, argsUsable,
 		// both be answered.
 		call.ID = streamed.ID
 	}
-}
-
-// partsWithoutCalls splits a turn's parts into those that are not function
-// calls, the calls themselves, both in the order they streamed, and the index
-// among the kept parts where the first call sat — where the calls the turn ends
-// up reporting belong. A turn holding no call reports the index past the last
-// part; see [eventLeadsWithCall] for what places those.
-func partsWithoutCalls(content *genai.Content) ([]*genai.Part, []*genai.FunctionCall, int) {
-	if content == nil {
-		return nil, nil, 0
-	}
-	kept := make([]*genai.Part, 0, len(content.Parts))
-	var calls []*genai.FunctionCall
-	at := -1
-	for _, part := range content.Parts {
-		if part.FunctionCall != nil {
-			if at < 0 {
-				at = len(kept)
-			}
-			calls = append(calls, part.FunctionCall)
-			continue
-		}
-		kept = append(kept, part)
-	}
-	if at < 0 {
-		at = len(kept)
-	}
-	return kept, calls, at
 }
 
 // finalizeStreamResponse closes out a streamed turn on the aggregated response.

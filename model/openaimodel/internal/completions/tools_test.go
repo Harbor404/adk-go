@@ -15,6 +15,7 @@
 package completions
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -76,6 +77,38 @@ func TestConvertTools_NoParametersDefaultsToEmptyObject(t *testing.T) {
 	params := fn["parameters"].(map[string]any)
 	if params["type"] != "object" {
 		t.Errorf("parameters = %#v, want an empty object schema", params)
+	}
+}
+
+// TestConvertTools_ParametersJsonSchema covers the schema functiontool.New
+// emits, whose optional properties must stay optional: the strict rewrite that
+// response schemas get would list every property as required.
+func TestConvertTools_ParametersJsonSchema(t *testing.T) {
+	wire := chatWire(t, toolReq(&genai.GenerateContentConfig{Tools: []*genai.Tool{{
+		FunctionDeclarations: []*genai.FunctionDeclaration{{
+			Name: "get_weather",
+			ParametersJsonSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"city":  map[string]any{"type": "string"},
+					"units": map[string]any{"type": "string"},
+				},
+				"required":             []any{"city"},
+				"additionalProperties": false,
+			},
+		}},
+	}}}))
+	fn := wire["tools"].([]any)[0].(map[string]any)["function"].(map[string]any)
+	params := fn["parameters"].(map[string]any)
+	props, _ := params["properties"].(map[string]any)
+	if _, ok := props["units"]; !ok || len(props) != 2 {
+		t.Errorf("properties = %#v, want city and units", params["properties"])
+	}
+	if got := params["required"]; !reflect.DeepEqual(got, []any{"city"}) {
+		t.Errorf("required = %v, want only city", got)
+	}
+	if got := params["additionalProperties"]; got != false {
+		t.Errorf("additionalProperties = %v, want false", got)
 	}
 }
 

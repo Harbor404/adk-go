@@ -968,7 +968,7 @@ func TestReplayedReasoning(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := replayedReasoning(tt.part); got != tt.want {
+			if got := openaicommon.ReplayedReasoning(tt.part); got != tt.want {
 				t.Errorf("replayedReasoning() = %v, want %v", got, tt.want)
 			}
 		})
@@ -1005,7 +1005,7 @@ func TestUnsupportedPayload_WalksEveryPartField(t *testing.T) {
 			part := &genai.Part{}
 			reflect.ValueOf(part).Elem().Field(i).Set(nonZero(t, field.Type))
 
-			got := unsupportedPayload(part)
+			got := openaicommon.UnsupportedPayload(part)
 			if why, accounted := accountedForFields[field.Name]; accounted {
 				if got != "" {
 					t.Errorf("unsupportedPayload() = %q for a part carrying only %s, want %q: %s",
@@ -1081,7 +1081,7 @@ func TestReplayedReasoning_EveryUnaccountedFieldDisqualifies(t *testing.T) {
 		t.Run(field.Name, func(t *testing.T) {
 			part := &genai.Part{Thought: true, Text: "scratch"}
 			reflect.ValueOf(part).Elem().Field(i).Set(nonZero(t, field.Type))
-			if replayedReasoning(part) {
+			if openaicommon.ReplayedReasoning(part) {
 				t.Errorf("replayedReasoning() = true for a thought carrying %s; "+
 					"it would be dropped instead of rejected as unsupported", field.Name)
 			}

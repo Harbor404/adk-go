@@ -71,7 +71,23 @@ func convertMessage(msg openai.ChatCompletionMessage) ([]*genai.Part, error) {
 		parts = append(parts, &genai.Part{Text: msg.Refusal})
 	}
 	for _, call := range msg.ToolCalls {
+		if call.Type != "" && call.Type != "function" {
+			// Only function tools are ever declared, so nothing can answer it.
+			// adk-python skips such a call; this fails the turn, as the
+			// Responses path does for an output item it cannot convert.
+			return nil, fmt.Errorf("%w: tool call %q", openaicommon.ErrUnsupportedOutputItemType, call.Type)
+		}
 		fn := call.Function
+		if fn.Name == "" {
+			if call.ID == "" && fn.Arguments == "" {
+				// The accumulator pads a tool-call index a stream skipped, and
+				// no call was made there.
+				continue
+			}
+			// Stored in the session, a nameless call would fail every later
+			// request, so the turn fails here instead.
+			return nil, fmt.Errorf("%w (call_id %q)", openaicommon.ErrFunctionCallMissingName, call.ID)
+		}
 		args, err := functionCallArgs(fn.Arguments)
 		if err != nil {
 			// Name the offending call: conversion aborts on the first error, so

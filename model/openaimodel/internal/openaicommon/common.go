@@ -547,6 +547,92 @@ func CarriesContent(resp *model.LLMResponse) bool {
 	return resp != nil && resp.Content != nil && len(resp.Content.Parts) > 0
 }
 
+// ReplayedReasoning reports whether part is reasoning carried over from an
+// earlier turn that carries nothing else, so dropping it loses nothing: the
+// Responses API accepts reasoning back only as an input item referencing the
+// id that produced it, an id ADK does not carry, and Chat Completions has no
+// field for it, so sent as assistant text it would read as words the model
+// never said.
+//
+// Whether to send a part's text is decided by part.Thought alone, because a
+// part can carry both reasoning text and a call, and the call must survive.
+func ReplayedReasoning(part *genai.Part) bool {
+	if part == nil {
+		return false
+	}
+	// A signature can arrive on a part of its own with the marker unset; there
+	// is nowhere to put it in a request to either endpoint.
+	if !part.Thought && len(part.ThoughtSignature) == 0 {
+		return false
+	}
+	// Text on a part not marked as a thought is an answer, signature or not.
+	if part.Text != "" && !part.Thought {
+		return false
+	}
+	// Marking a call or anything else as a thought must not make it vanish.
+	return part.FunctionCall == nil && part.FunctionResponse == nil &&
+		UnsupportedPayload(part) == ""
+}
+
+// UnsupportedPayload names the first field on part that neither endpoint has a
+// way to send, or "" when the part holds nothing beyond what their request
+// converters account for.
+//
+// The test is stated as the absence of anything unaccounted for rather than as
+// a list of the fields that disqualify a part, so that a field added to
+// genai.Part by a later release is reported here by default instead of leaving
+// the request unnoticed.
+func UnsupportedPayload(part *genai.Part) string {
+	if part == nil {
+		return ""
+	}
+	rest := *part
+	rest.Text = ""              // sent, or dropped when it is reasoning
+	rest.Thought = false        // the marker deciding which
+	rest.ThoughtSignature = nil // no request field on either endpoint carries one
+	rest.FunctionCall = nil     // sent as a call
+	rest.FunctionResponse = nil // sent as the call's result
+	rest.VideoMetadata = nil    // qualifies media carried in another field
+	rest.MediaResolution = nil  // likewise
+	rest.PartMetadata = nil     // caller bookkeeping, never content
+
+	v := reflect.ValueOf(rest)
+	for i := range v.NumField() {
+		if !v.Field(i).IsZero() {
+			return v.Type().Field(i).Name
+		}
+	}
+	return ""
+}
+
+// PartsWithoutCalls splits a turn's parts into those that are not function
+// calls, the calls themselves, both in the order they streamed, and the index
+// among the kept parts where the first call sat — where the calls the turn ends
+// up reporting belong. A turn holding no call reports the index past the last
+// part.
+func PartsWithoutCalls(content *genai.Content) ([]*genai.Part, []*genai.FunctionCall, int) {
+	if content == nil {
+		return nil, nil, 0
+	}
+	kept := make([]*genai.Part, 0, len(content.Parts))
+	var calls []*genai.FunctionCall
+	at := -1
+	for _, part := range content.Parts {
+		if part.FunctionCall != nil {
+			if at < 0 {
+				at = len(kept)
+			}
+			calls = append(calls, part.FunctionCall)
+			continue
+		}
+		kept = append(kept, part)
+	}
+	if at < 0 {
+		at = len(kept)
+	}
+	return kept, calls, at
+}
+
 // CompletedContentSupersedes reports whether a terminal snapshot can safely
 // replace content assembled from stream deltas. Reasoning alone is not a usable
 // replacement, and the snapshot must retain all visible text and function calls
