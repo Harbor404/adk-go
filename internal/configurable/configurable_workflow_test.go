@@ -602,13 +602,15 @@ func init() {
 
 func TestParseEdges_RouteOrderIsDeterministic(t *testing.T) {
 	// A bare range cannot pass this test by luck, and the declaration order
-	// below is what guarantees it. On go1.26 twelve entries sit in two map
-	// groups, each keeping its keys in declaration order, so a bare range
-	// yields sorted order only when the sorted keys split into a prefix of
-	// four to eight keys and a remainder, each declared in ascending order.
-	// Every such prefix holds both "10" and "2", which sort in that order,
-	// but "2" is declared first, so no such split exists. Keep "2" declared
-	// ahead of "10".
+	// below is what guarantees it. On go1.26 twelve entries fill two map
+	// groups, each holding its keys in declaration order, and iteration
+	// starts at a random slot and wraps around the table. So a bare range
+	// yields sorted order only when the keys, read in sorted order around a
+	// circle (zulu back to "10"), split into two arcs of four to eight keys,
+	// each declared in the order the arc runs. "10", "2" and ALPHA are
+	// neighbours on that circle and are declared in reverse, so both gaps
+	// around "2" would have to fall between arcs, leaving "2" alone in one.
+	// Keep ALPHA declared before "2", and "2" before "10".
 	//
 	// Three key choices pin which order, not just that there is one:
 	// "10" before "2" separates byte order from numeric, "zulu" after
