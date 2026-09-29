@@ -31,11 +31,15 @@ import (
 	"google.golang.org/adk/v2/model/openaimodel/internal/shared"
 )
 
+// Model talks to the Responses API. It is what openaimodel.NewModel returns
+// for a ClientConfig whose API is openaimodel.APIResponses or unset.
 type Model struct {
 	client *openai.Client
 	name   string
 }
 
+// Name returns the model name a request is sent with when it does not name
+// one itself.
 func (m *Model) Name() string { return m.name }
 
 // GenerateContent converts a generic LLMRequest into an OpenAI-specific request,

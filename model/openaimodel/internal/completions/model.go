@@ -40,6 +40,8 @@ type Model struct {
 	name   string
 }
 
+// Name returns the model name a request is sent with when it does not name
+// one itself.
 func (m *Model) Name() string { return m.name }
 
 // GenerateContent converts a generic LLMRequest into a Chat Completions request
