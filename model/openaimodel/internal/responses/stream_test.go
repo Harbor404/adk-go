@@ -20,16 +20,16 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/openai/openai-go/v3/responses"
+	oairesponses "github.com/openai/openai-go/v3/responses"
 
 	"google.golang.org/adk/v2/internal/llminternal"
 
 	"google.golang.org/adk/v2/model/openaimodel/internal/shared"
 )
 
-func decodeEvent(t *testing.T, body string) responses.ResponseStreamEventUnion {
+func decodeEvent(t *testing.T, body string) oairesponses.ResponseStreamEventUnion {
 	t.Helper()
-	var evt responses.ResponseStreamEventUnion
+	var evt oairesponses.ResponseStreamEventUnion
 	if err := json.Unmarshal([]byte(body), &evt); err != nil {
 		t.Fatalf("decodeEvent: %v", err)
 	}
@@ -135,7 +135,7 @@ func TestStreamTranslator_WithAggregator(t *testing.T) {
 	tr := newStreamTranslator()
 	aggregator := llminternal.NewStreamingResponseAggregator()
 
-	events := []responses.ResponseStreamEventUnion{
+	events := []oairesponses.ResponseStreamEventUnion{
 		decodeEvent(t, `{"type":"response.output_text.delta","delta":"hel"}`),
 		decodeEvent(t, `{"type":"response.output_text.delta","delta":"lo"}`),
 	}

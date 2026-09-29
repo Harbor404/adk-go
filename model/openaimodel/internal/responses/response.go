@@ -19,7 +19,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/openai/openai-go/v3/responses"
+	oairesponses "github.com/openai/openai-go/v3/responses"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/model/openaimodel/internal/shared"
@@ -27,7 +27,7 @@ import (
 
 // convertResponse takes an OpenAI API response and transforms it into our
 // generic genai.GenerateContentResponse format.
-func convertResponse(resp *responses.Response) (*genai.GenerateContentResponse, error) {
+func convertResponse(resp *oairesponses.Response) (*genai.GenerateContentResponse, error) {
 	if resp == nil {
 		return nil, shared.ErrEmptyResponse
 	}
@@ -51,9 +51,9 @@ func convertResponse(resp *responses.Response) (*genai.GenerateContentResponse, 
 // "failed" qualifies — "incomplete" is an ordinary truncation — except that a
 // body stating no status at all, which the API permits, is judged by its error
 // object instead.
-func reportsFailure(resp *responses.Response) bool {
+func reportsFailure(resp *oairesponses.Response) bool {
 	switch resp.Status {
-	case responses.ResponseStatusFailed:
+	case oairesponses.ResponseStatusFailed:
 		return true
 	case "":
 		// Clipped, not raw: the renderer reports what clipping leaves, so a
@@ -75,7 +75,7 @@ func reportsFailure(resp *responses.Response) bool {
 // quoting is what makes the field boundary the server's to state rather than to
 // forge. Neither is elided when the message appears to repeat it — saying a code
 // twice is cosmetic, dropping the one the caller needs is not.
-func failedResponseError(resp *responses.Response) error {
+func failedResponseError(resp *oairesponses.Response) error {
 	// Clipped, so a value of nothing but spaces contributes nothing rather than
 	// a label or separator with nothing after it.
 	msg := shared.ClipServerText(resp.Error.Message)
@@ -99,7 +99,7 @@ func failedResponseError(resp *responses.Response) error {
 	}
 }
 
-func buildCandidate(resp *responses.Response) (*genai.Candidate, error) {
+func buildCandidate(resp *oairesponses.Response) (*genai.Candidate, error) {
 	parts, err := convertOutputItems(resp.Output)
 	if err != nil {
 		return nil, err
@@ -121,7 +121,7 @@ func buildCandidate(resp *responses.Response) (*genai.Candidate, error) {
 // types of output items, such as messages (text, refusal), function calls,
 // and reasoning (thoughts and summaries), extracting the relevant information
 // for each.
-func convertOutputItems(items []responses.ResponseOutputItemUnion) ([]*genai.Part, error) {
+func convertOutputItems(items []oairesponses.ResponseOutputItemUnion) ([]*genai.Part, error) {
 	if len(items) == 0 {
 		return nil, shared.ErrNoOutputItems
 	}
@@ -169,7 +169,7 @@ func convertOutputItems(items []responses.ResponseOutputItemUnion) ([]*genai.Par
 	return parts, nil
 }
 
-func convertFunctionCall(item responses.ResponseOutputItemUnion) (*genai.Part, error) {
+func convertFunctionCall(item oairesponses.ResponseOutputItemUnion) (*genai.Part, error) {
 	args, err := functionCallArgs(item.Arguments)
 	if err != nil {
 		// Name the offending call: convertOutputItems aborts the entire
@@ -186,7 +186,7 @@ func convertFunctionCall(item responses.ResponseOutputItemUnion) (*genai.Part, e
 }
 
 // functionCallArgs decodes the arguments of a function call output item.
-func functionCallArgs(arguments responses.ResponseOutputItemUnionArguments) (map[string]any, error) {
+func functionCallArgs(arguments oairesponses.ResponseOutputItemUnionArguments) (map[string]any, error) {
 	var raw string
 	switch v := arguments.OfResponseToolSearchCallArguments.(type) {
 	case nil:
@@ -228,7 +228,7 @@ func functionCallArgs(arguments responses.ResponseOutputItemUnionArguments) (map
 //
 // A failed response never reaches here: both callers fail the turn, by way of
 // reportsFailure, before asking why it ended.
-func finishReason(resp *responses.Response, incompleteEvent bool) genai.FinishReason {
+func finishReason(resp *oairesponses.Response, incompleteEvent bool) genai.FinishReason {
 	if resp == nil {
 		return genai.FinishReasonUnspecified
 	}
@@ -256,14 +256,14 @@ func finishReason(resp *responses.Response, incompleteEvent bool) genai.FinishRe
 // openai-go marks incomplete_details required but neither its reason nor the
 // status, so a provider may declare a turn truncated and leave either empty.
 // Every signal that survives that is read here.
-func truncated(resp *responses.Response, incompleteEvent bool) bool {
+func truncated(resp *oairesponses.Response, incompleteEvent bool) bool {
 	if incompleteEvent {
 		// The event stands in for "response.completed", so its name is the
 		// provider's verdict, and it outranks a payload that says otherwise.
 		return true
 	}
 	switch resp.Status {
-	case responses.ResponseStatusCompleted:
+	case oairesponses.ResponseStatusCompleted:
 		return false
 	case "":
 		// A finished turn carries incomplete_details as null.
@@ -279,7 +279,7 @@ func truncated(resp *responses.Response, incompleteEvent bool) bool {
 // finishMessage is the provider's own account of why a turn ended, which the
 // finish reason flattens away: an unmapped incomplete reason and a failure both
 // arrive as OTHER.
-func finishMessage(resp *responses.Response, incompleteEvent bool) string {
+func finishMessage(resp *oairesponses.Response, incompleteEvent bool) string {
 	if resp == nil {
 		return ""
 	}
@@ -292,18 +292,18 @@ func finishMessage(resp *responses.Response, incompleteEvent bool) string {
 	// The contradiction truncated() resolves, resolved the same way: the event's
 	// name outranks a payload calling the turn completed. Every other status is
 	// still the provider's own wording for why.
-	if resp.Status != "" && (!incompleteEvent || resp.Status != responses.ResponseStatusCompleted) {
+	if resp.Status != "" && (!incompleteEvent || resp.Status != oairesponses.ResponseStatusCompleted) {
 		return string(resp.Status)
 	}
 	if truncated(resp, incompleteEvent) {
 		// No usable reason or status, yet the turn did not finish: the event's
 		// name, or a bare incomplete_details, is all the provider said.
-		return string(responses.ResponseStatusIncomplete)
+		return string(oairesponses.ResponseStatusIncomplete)
 	}
 	return ""
 }
 
-func convertUsage(usage responses.ResponseUsage) *genai.GenerateContentResponseUsageMetadata {
+func convertUsage(usage oairesponses.ResponseUsage) *genai.GenerateContentResponseUsageMetadata {
 	return &genai.GenerateContentResponseUsageMetadata{
 		PromptTokenCount:        shared.SafeInt32(usage.InputTokens),
 		CandidatesTokenCount:    shared.SafeInt32(usage.OutputTokens),
@@ -324,7 +324,7 @@ func convertUsage(usage responses.ResponseUsage) *genai.GenerateContentResponseU
 // its content from the deltas and its logprobs from the terminal event, and the
 // two disagree on a provider that resends different output; probabilities read
 // against text they do not belong to are worse than none.
-func logprobsFor(resp *responses.Response, text string) *genai.LogprobsResult {
+func logprobsFor(resp *oairesponses.Response, text string) *genai.LogprobsResult {
 	if resp == nil || outputText(resp.Output) != text {
 		return nil
 	}
@@ -335,7 +335,7 @@ func logprobsFor(resp *responses.Response, text string) *genai.LogprobsResult {
 // items logprobs are attached to. It must agree with convertOutputItems on what
 // a message's text is, refusals included, or the two paths would disagree over
 // whether the logprobs describe the same answer.
-func outputText(items []responses.ResponseOutputItemUnion) string {
+func outputText(items []oairesponses.ResponseOutputItemUnion) string {
 	var text strings.Builder
 	for _, item := range items {
 		if item.Type != "message" {
@@ -353,7 +353,7 @@ func outputText(items []responses.ResponseOutputItemUnion) string {
 	return text.String()
 }
 
-func convertLogprobs(items []responses.ResponseOutputItemUnion) *genai.LogprobsResult {
+func convertLogprobs(items []oairesponses.ResponseOutputItemUnion) *genai.LogprobsResult {
 	if len(items) == 0 {
 		return nil
 	}

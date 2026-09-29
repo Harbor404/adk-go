@@ -19,7 +19,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/openai/openai-go/v3/responses"
+	oairesponses "github.com/openai/openai-go/v3/responses"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/model/openaimodel/internal/shared"
@@ -41,7 +41,7 @@ func newStreamTranslator() *streamTranslator {
 	}
 }
 
-func (t *streamTranslator) process(evt responses.ResponseStreamEventUnion) (*genai.GenerateContentResponse, error) {
+func (t *streamTranslator) process(evt oairesponses.ResponseStreamEventUnion) (*genai.GenerateContentResponse, error) {
 	// We process each incoming OpenAI streaming event and convert it into a
 	// generic genai.GenerateContentResponse.
 	switch evt.Type {
@@ -146,7 +146,7 @@ func (t *streamTranslator) buffer(id string) *strings.Builder {
 // We construct a genai.Part with a genai.FunctionCall by retrieving the complete,
 // buffered function arguments (either from the done event or our functionArgs map)
 // and unmarshaling them from JSON. Finally, we clean up the buffered arguments.
-func (t *streamTranslator) emitFunctionCall(done responses.ResponseFunctionCallArgumentsDoneEvent) (*genai.Part, error) {
+func (t *streamTranslator) emitFunctionCall(done oairesponses.ResponseFunctionCallArgumentsDoneEvent) (*genai.Part, error) {
 	payload := done.Arguments
 	if payload == "" {
 		if b, ok := t.functionArgs[done.ItemID]; ok {

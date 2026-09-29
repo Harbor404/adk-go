@@ -21,7 +21,7 @@ import (
 	"strings"
 
 	"github.com/openai/openai-go/v3/packages/param"
-	"github.com/openai/openai-go/v3/responses"
+	oairesponses "github.com/openai/openai-go/v3/responses"
 	oaishared "github.com/openai/openai-go/v3/shared"
 	"github.com/openai/openai-go/v3/shared/constant"
 	"google.golang.org/genai"
@@ -32,13 +32,13 @@ import (
 )
 
 // buildParams converts a generic LLMRequest into the OpenAI-specific
-// responses.ResponseNewParams format, preparing it for an API call.
-func buildParams(modelName string, req *model.LLMRequest) (responses.ResponseNewParams, error) {
+// oairesponses.ResponseNewParams format, preparing it for an API call.
+func buildParams(modelName string, req *model.LLMRequest) (oairesponses.ResponseNewParams, error) {
 	if req == nil {
-		return responses.ResponseNewParams{}, shared.ErrRequestNil
+		return oairesponses.ResponseNewParams{}, shared.ErrRequestNil
 	}
 
-	params := responses.ResponseNewParams{
+	params := oairesponses.ResponseNewParams{
 		Model: oaishared.ResponsesModel(modelName),
 	}
 	if req.Model != "" {
@@ -48,7 +48,7 @@ func buildParams(modelName string, req *model.LLMRequest) (responses.ResponseNew
 	// We convert the generic content parts into OpenAI's input format.
 	input, droppedReasoning, err := convertContents(req.Contents)
 	if err != nil {
-		return responses.ResponseNewParams{}, err
+		return oairesponses.ResponseNewParams{}, err
 	}
 	if len(input) == 0 {
 		if droppedReasoning {
@@ -56,24 +56,24 @@ func buildParams(modelName string, req *model.LLMRequest) (responses.ResponseNew
 			// caller who sent nothing. Gated on a part actually having been
 			// dropped, so a request that was empty on arrival still returns
 			// the bare sentinel a caller may compare against directly.
-			return responses.ResponseNewParams{}, fmt.Errorf(
+			return oairesponses.ResponseNewParams{}, fmt.Errorf(
 				"%w: every part was dropped as replayed reasoning", shared.ErrNoContents)
 		}
-		return responses.ResponseNewParams{}, shared.ErrNoContents
+		return oairesponses.ResponseNewParams{}, shared.ErrNoContents
 	}
-	params.Input = responses.ResponseNewParamsInputUnion{
+	params.Input = oairesponses.ResponseNewParamsInputUnion{
 		OfInputItemList: input,
 	}
 
 	// Apply generation configuration settings like temperature and max output tokens.
 	if err := applyGenerationConfig(&params, req.Config); err != nil {
-		return responses.ResponseNewParams{}, err
+		return oairesponses.ResponseNewParams{}, err
 	}
 
 	// Convert any specified tools into the OpenAI tool format.
 	tools, err := convertTools(req.Config)
 	if err != nil {
-		return responses.ResponseNewParams{}, err
+		return oairesponses.ResponseNewParams{}, err
 	}
 	if len(tools) > 0 {
 		params.Tools = tools
@@ -83,7 +83,7 @@ func buildParams(modelName string, req *model.LLMRequest) (responses.ResponseNew
 	if cfg := req.Config; cfg != nil && cfg.ToolConfig != nil {
 		choice, err := convertToolChoice(cfg.ToolConfig)
 		if err != nil {
-			return responses.ResponseNewParams{}, err
+			return oairesponses.ResponseNewParams{}, err
 		}
 		if choice != nil {
 			params.ToolChoice = *choice
@@ -96,9 +96,9 @@ func buildParams(modelName string, req *model.LLMRequest) (responses.ResponseNew
 // convertContents converts contents into Responses API input items, reporting
 // separately whether any part was dropped as replayed reasoning. The caller
 // needs that to tell a request the drop emptied from one that arrived empty.
-func convertContents(contents []*genai.Content) (responses.ResponseInputParam, bool, error) {
+func convertContents(contents []*genai.Content) (oairesponses.ResponseInputParam, bool, error) {
 	var (
-		items            responses.ResponseInputParam
+		items            oairesponses.ResponseInputParam
 		tracker          shared.CallTracker
 		textParts        []string
 		droppedReasoning bool
@@ -115,13 +115,13 @@ func convertContents(contents []*genai.Content) (responses.ResponseInputParam, b
 			}
 			// The Responses API rejects "input_text" for the assistant role, so
 			// a replayed assistant turn goes out as an output message instead.
-			if msgRole == responses.EasyInputMessageRoleAssistant {
+			if msgRole == oairesponses.EasyInputMessageRoleAssistant {
 				if msg := newOutputMessage(textParts); msg != nil {
-					items = append(items, responses.ResponseInputItemUnionParam{OfOutputMessage: msg})
+					items = append(items, oairesponses.ResponseInputItemUnionParam{OfOutputMessage: msg})
 				}
 			} else {
 				if msg := newMessage(msgRole, textParts); msg != nil {
-					items = append(items, responses.ResponseInputItemUnionParam{OfMessage: msg})
+					items = append(items, oairesponses.ResponseInputItemUnionParam{OfMessage: msg})
 				}
 			}
 			textParts = textParts[:0]
@@ -173,7 +173,7 @@ func convertContents(contents []*genai.Content) (responses.ResponseInputParam, b
 				if err != nil {
 					return nil, false, err
 				}
-				items = append(items, responses.ResponseInputItemUnionParam{OfFunctionCall: callParam})
+				items = append(items, oairesponses.ResponseInputItemUnionParam{OfFunctionCall: callParam})
 			case part.FunctionResponse != nil:
 				// Similarly, for a function response, we flush text before adding the response.
 				if err := flushText(); err != nil {
@@ -183,7 +183,7 @@ func convertContents(contents []*genai.Content) (responses.ResponseInputParam, b
 				if err != nil {
 					return nil, false, err
 				}
-				items = append(items, responses.ResponseInputItemUnionParam{OfFunctionCallOutput: respParam})
+				items = append(items, oairesponses.ResponseInputItemUnionParam{OfFunctionCallOutput: respParam})
 			case !sendText && !shared.ReplayedReasoning(part):
 				// Nothing in the part reaches the request. It keeps the
 				// unsupported-content-part prefix the single message used
@@ -201,30 +201,30 @@ func convertContents(contents []*genai.Content) (responses.ResponseInputParam, b
 }
 
 // newMessage builds an easy input message for an already-normalized role.
-func newMessage(msgRole responses.EasyInputMessageRole, texts []string) *responses.EasyInputMessageParam {
+func newMessage(msgRole oairesponses.EasyInputMessageRole, texts []string) *oairesponses.EasyInputMessageParam {
 	if len(texts) == 0 {
 		return nil
 	}
-	contentList := make(responses.ResponseInputMessageContentListParam, 0, len(texts))
+	contentList := make(oairesponses.ResponseInputMessageContentListParam, 0, len(texts))
 	for _, txt := range texts {
 		if strings.TrimSpace(txt) == "" {
 			continue
 		}
-		textParam := responses.ResponseInputTextParam{
+		textParam := oairesponses.ResponseInputTextParam{
 			Text: txt,
 			Type: constant.InputText("input_text"),
 		}
-		contentList = append(contentList, responses.ResponseInputContentUnionParam{
+		contentList = append(contentList, oairesponses.ResponseInputContentUnionParam{
 			OfInputText: &textParam,
 		})
 	}
 	if len(contentList) == 0 {
 		return nil
 	}
-	return &responses.EasyInputMessageParam{
+	return &oairesponses.EasyInputMessageParam{
 		Role: msgRole,
-		Type: responses.EasyInputMessageTypeMessage,
-		Content: responses.EasyInputMessageContentUnionParam{
+		Type: oairesponses.EasyInputMessageTypeMessage,
+		Content: oairesponses.EasyInputMessageContentUnionParam{
 			OfInputItemContentList: contentList,
 		},
 	}
@@ -233,17 +233,17 @@ func newMessage(msgRole responses.EasyInputMessageRole, texts []string) *respons
 // newOutputMessage builds an assistant output message whose content uses the
 // "output_text" type, as required when replaying a prior assistant turn to the
 // OpenAI Responses API.
-func newOutputMessage(texts []string) *responses.ResponseOutputMessageParam {
+func newOutputMessage(texts []string) *oairesponses.ResponseOutputMessageParam {
 	if len(texts) == 0 {
 		return nil
 	}
-	contentList := make([]responses.ResponseOutputMessageContentUnionParam, 0, len(texts))
+	contentList := make([]oairesponses.ResponseOutputMessageContentUnionParam, 0, len(texts))
 	for _, txt := range texts {
 		if strings.TrimSpace(txt) == "" {
 			continue
 		}
-		contentList = append(contentList, responses.ResponseOutputMessageContentUnionParam{
-			OfOutputText: &responses.ResponseOutputTextParam{
+		contentList = append(contentList, oairesponses.ResponseOutputMessageContentUnionParam{
+			OfOutputText: &oairesponses.ResponseOutputTextParam{
 				Text: txt,
 				Type: constant.OutputText("output_text"),
 			},
@@ -252,22 +252,22 @@ func newOutputMessage(texts []string) *responses.ResponseOutputMessageParam {
 	if len(contentList) == 0 {
 		return nil
 	}
-	return &responses.ResponseOutputMessageParam{
+	return &oairesponses.ResponseOutputMessageParam{
 		Content: contentList,
-		Status:  responses.ResponseOutputMessageStatusCompleted,
+		Status:  oairesponses.ResponseOutputMessageStatusCompleted,
 	}
 }
 
-func normalizeRole(role genai.Role) (responses.EasyInputMessageRole, error) {
+func normalizeRole(role genai.Role) (oairesponses.EasyInputMessageRole, error) {
 	switch role {
 	case "", genai.RoleUser:
-		return responses.EasyInputMessageRoleUser, nil
+		return oairesponses.EasyInputMessageRoleUser, nil
 	case genai.RoleModel:
-		return responses.EasyInputMessageRoleAssistant, nil
+		return oairesponses.EasyInputMessageRoleAssistant, nil
 	case "system":
-		return responses.EasyInputMessageRoleSystem, nil
+		return oairesponses.EasyInputMessageRoleSystem, nil
 	case "developer":
-		return responses.EasyInputMessageRoleDeveloper, nil
+		return oairesponses.EasyInputMessageRoleDeveloper, nil
 	default:
 		return "", fmt.Errorf("openai: unsupported role %q", role)
 	}
@@ -276,7 +276,7 @@ func normalizeRole(role genai.Role) (responses.EasyInputMessageRole, error) {
 // newFunctionCall converts a generic genai.FunctionCall into an OpenAI-specific
 // ResponseFunctionToolCallParam. We generate a unique callID if one isn't
 // provided, and then marshal the function arguments into a JSON string.
-func newFunctionCall(t *shared.CallTracker, fc *genai.FunctionCall) (*responses.ResponseFunctionToolCallParam, error) {
+func newFunctionCall(t *shared.CallTracker, fc *genai.FunctionCall) (*oairesponses.ResponseFunctionToolCallParam, error) {
 	if fc.Name == "" {
 		return nil, shared.ErrFunctionCallMissingName
 	}
@@ -285,7 +285,7 @@ func newFunctionCall(t *shared.CallTracker, fc *genai.FunctionCall) (*responses.
 	if err != nil {
 		return nil, err
 	}
-	return &responses.ResponseFunctionToolCallParam{
+	return &oairesponses.ResponseFunctionToolCallParam{
 		Name:      fc.Name,
 		CallID:    callID,
 		Arguments: args,
@@ -297,7 +297,7 @@ func newFunctionCall(t *shared.CallTracker, fc *genai.FunctionCall) (*responses.
 // ResponseInputItemFunctionCallOutputParam. We try to match the response to a pending
 // function call. If an explicit callID is provided, we find and remove it from our
 // pending list. Otherwise, we assume it corresponds to the oldest pending call.
-func newFunctionResponse(t *shared.CallTracker, fr *genai.FunctionResponse) (*responses.ResponseInputItemFunctionCallOutputParam, error) {
+func newFunctionResponse(t *shared.CallTracker, fr *genai.FunctionResponse) (*oairesponses.ResponseInputItemFunctionCallOutputParam, error) {
 	callID, err := t.ResolveResponseID(fr)
 	if err != nil {
 		return nil, err
@@ -306,9 +306,9 @@ func newFunctionResponse(t *shared.CallTracker, fr *genai.FunctionResponse) (*re
 	if err != nil {
 		return nil, fmt.Errorf("openai: marshal function response: %w", err)
 	}
-	return &responses.ResponseInputItemFunctionCallOutputParam{
+	return &oairesponses.ResponseInputItemFunctionCallOutputParam{
 		CallID: param.NewOpt(callID),
-		Output: responses.ResponseInputItemFunctionCallOutputOutputUnionParam{
+		Output: oairesponses.ResponseInputItemFunctionCallOutputOutputUnionParam{
 			OfString: param.NewOpt(string(payload)),
 		},
 		Type: constant.FunctionCallOutput("function_call_output"),
@@ -318,7 +318,7 @@ func newFunctionResponse(t *shared.CallTracker, fr *genai.FunctionResponse) (*re
 // applyGenerationConfig translates our generic generation configuration into
 // OpenAI-specific parameters. We also validate and return errors for features
 // that are not supported by the OpenAI Responses API.
-func applyGenerationConfig(params *responses.ResponseNewParams, cfg *genai.GenerateContentConfig) error {
+func applyGenerationConfig(params *oairesponses.ResponseNewParams, cfg *genai.GenerateContentConfig) error {
 	if cfg == nil {
 		return nil
 	}
@@ -350,7 +350,7 @@ func applyGenerationConfig(params *responses.ResponseNewParams, cfg *genai.Gener
 			params.TopLogprobs = param.NewOpt(int64(1))
 		}
 		// Responses returns logprobs only when explicitly included.
-		params.Include = append(params.Include, responses.ResponseIncludableMessageOutputTextLogprobs)
+		params.Include = append(params.Include, oairesponses.ResponseIncludableMessageOutputTextLogprobs)
 	}
 	if cfg.SystemInstruction != nil {
 		inst, err := shared.FlattenContentText(cfg.SystemInstruction)
@@ -367,8 +367,8 @@ func applyGenerationConfig(params *responses.ResponseNewParams, cfg *genai.Gener
 	if cfg.ResponseMIMEType == "application/json" || cfg.ResponseSchema != nil || cfg.ResponseJsonSchema != nil {
 		if cfg.ResponseSchema == nil && cfg.ResponseJsonSchema == nil {
 			obj := oaishared.NewResponseFormatJSONObjectParam()
-			params.Text = responses.ResponseTextConfigParam{
-				Format: responses.ResponseFormatTextConfigUnionParam{
+			params.Text = oairesponses.ResponseTextConfigParam{
+				Format: oairesponses.ResponseFormatTextConfigUnionParam{
 					OfJSONObject: &obj,
 				},
 			}
@@ -377,8 +377,8 @@ func applyGenerationConfig(params *responses.ResponseNewParams, cfg *genai.Gener
 			if err != nil {
 				return err
 			}
-			params.Text = responses.ResponseTextConfigParam{
-				Format: responses.ResponseFormatTextConfigUnionParam{
+			params.Text = oairesponses.ResponseTextConfigParam{
+				Format: oairesponses.ResponseFormatTextConfigUnionParam{
 					OfJSONSchema: format,
 				},
 			}
@@ -410,11 +410,11 @@ func applyGenerationConfig(params *responses.ResponseNewParams, cfg *genai.Gener
 // serviceTiers maps genai's processing tiers onto the Responses equivalents.
 // "Unspecified" joins "standard" on default rather than auto, because genai
 // documents it as "Default service tier, which is standard".
-var serviceTiers = map[genai.ServiceTier]responses.ResponseNewParamsServiceTier{
-	genai.ServiceTierUnspecified: responses.ResponseNewParamsServiceTierDefault,
-	genai.ServiceTierStandard:    responses.ResponseNewParamsServiceTierDefault,
-	genai.ServiceTierFlex:        responses.ResponseNewParamsServiceTierFlex,
-	genai.ServiceTierPriority:    responses.ResponseNewParamsServiceTierPriority,
+var serviceTiers = map[genai.ServiceTier]oairesponses.ResponseNewParamsServiceTier{
+	genai.ServiceTierUnspecified: oairesponses.ResponseNewParamsServiceTierDefault,
+	genai.ServiceTierStandard:    oairesponses.ResponseNewParamsServiceTierDefault,
+	genai.ServiceTierFlex:        oairesponses.ResponseNewParamsServiceTierFlex,
+	genai.ServiceTierPriority:    oairesponses.ResponseNewParamsServiceTierPriority,
 }
 
 // applyThinkingConfig maps genai's thinking config onto effort-based reasoning.
@@ -422,7 +422,7 @@ var serviceTiers = map[genai.ServiceTier]responses.ResponseNewParamsServiceTier{
 // Summary rides on IncludeThoughts because summaries need a verified OpenAI
 // organization, so requesting one unprompted would fail an unverified org's
 // every reasoning call.
-func applyThinkingConfig(params *responses.ResponseNewParams, cfg *genai.ThinkingConfig) error {
+func applyThinkingConfig(params *oairesponses.ResponseNewParams, cfg *genai.ThinkingConfig) error {
 	if cfg == nil {
 		return nil
 	}
@@ -444,7 +444,7 @@ func applyThinkingConfig(params *responses.ResponseNewParams, cfg *genai.Thinkin
 // newJSONSchemaFormat constructs an OpenAI-specific JSON schema format from our
 // generic GenerateContentConfig. We handle cases where the schema is provided
 // directly or needs to be converted, and assign a name to it.
-func newJSONSchemaFormat(cfg *genai.GenerateContentConfig) (*responses.ResponseFormatTextJSONSchemaConfigParam, error) {
+func newJSONSchemaFormat(cfg *genai.GenerateContentConfig) (*oairesponses.ResponseFormatTextJSONSchemaConfigParam, error) {
 	var (
 		schema map[string]any
 		err    error
@@ -465,7 +465,7 @@ func newJSONSchemaFormat(cfg *genai.GenerateContentConfig) (*responses.ResponseF
 	if cfg.ResponseSchema != nil && cfg.ResponseSchema.Title != "" {
 		name = cfg.ResponseSchema.Title
 	}
-	return &responses.ResponseFormatTextJSONSchemaConfigParam{
+	return &oairesponses.ResponseFormatTextJSONSchemaConfigParam{
 		Name:   name,
 		Schema: schema,
 		Strict: param.NewOpt(true),

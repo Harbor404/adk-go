@@ -21,7 +21,7 @@ import (
 	"testing"
 
 	"github.com/openai/openai-go/v3/packages/param"
-	"github.com/openai/openai-go/v3/responses"
+	oairesponses "github.com/openai/openai-go/v3/responses"
 	"github.com/openai/openai-go/v3/shared/constant"
 	"google.golang.org/genai"
 )
@@ -331,7 +331,7 @@ func TestConvertToolChoice(t *testing.T) {
 		name    string
 		toolCfg *genai.ToolConfig
 		wantErr bool
-		want    *responses.ResponseNewParamsToolChoiceUnion
+		want    *oairesponses.ResponseNewParamsToolChoiceUnion
 	}{
 		{
 			name:    "nil cfg",
@@ -345,8 +345,8 @@ func TestConvertToolChoice(t *testing.T) {
 					Mode: genai.FunctionCallingConfigModeNone,
 				},
 			},
-			want: &responses.ResponseNewParamsToolChoiceUnion{
-				OfToolChoiceMode: param.NewOpt(responses.ToolChoiceOptionsNone),
+			want: &oairesponses.ResponseNewParamsToolChoiceUnion{
+				OfToolChoiceMode: param.NewOpt(oairesponses.ToolChoiceOptionsNone),
 			},
 		},
 		{
@@ -366,9 +366,9 @@ func TestConvertToolChoice(t *testing.T) {
 					AllowedFunctionNames: []string{"fn1"},
 				},
 			},
-			want: &responses.ResponseNewParamsToolChoiceUnion{
-				OfAllowedTools: &responses.ToolChoiceAllowedParam{
-					Mode:  responses.ToolChoiceAllowedModeAuto,
+			want: &oairesponses.ResponseNewParamsToolChoiceUnion{
+				OfAllowedTools: &oairesponses.ToolChoiceAllowedParam{
+					Mode:  oairesponses.ToolChoiceAllowedModeAuto,
 					Type:  constant.AllowedTools("allowed_tools"),
 					Tools: []map[string]any{{"type": "function", "name": "fn1"}},
 				},
@@ -391,9 +391,9 @@ func TestConvertToolChoice(t *testing.T) {
 					AllowedFunctionNames: []string{"fn1"},
 				},
 			},
-			want: &responses.ResponseNewParamsToolChoiceUnion{
-				OfAllowedTools: &responses.ToolChoiceAllowedParam{
-					Mode:  responses.ToolChoiceAllowedModeAuto,
+			want: &oairesponses.ResponseNewParamsToolChoiceUnion{
+				OfAllowedTools: &oairesponses.ToolChoiceAllowedParam{
+					Mode:  oairesponses.ToolChoiceAllowedModeAuto,
 					Type:  constant.AllowedTools("allowed_tools"),
 					Tools: []map[string]any{{"type": "function", "name": "fn1"}},
 				},
@@ -406,8 +406,8 @@ func TestConvertToolChoice(t *testing.T) {
 					Mode: genai.FunctionCallingConfigModeAny,
 				},
 			},
-			want: &responses.ResponseNewParamsToolChoiceUnion{
-				OfToolChoiceMode: param.NewOpt(responses.ToolChoiceOptionsRequired),
+			want: &oairesponses.ResponseNewParamsToolChoiceUnion{
+				OfToolChoiceMode: param.NewOpt(oairesponses.ToolChoiceOptionsRequired),
 			},
 		},
 		{
@@ -418,9 +418,9 @@ func TestConvertToolChoice(t *testing.T) {
 					AllowedFunctionNames: []string{"fn1", ""},
 				},
 			},
-			want: &responses.ResponseNewParamsToolChoiceUnion{
-				OfAllowedTools: &responses.ToolChoiceAllowedParam{
-					Mode:  responses.ToolChoiceAllowedModeRequired,
+			want: &oairesponses.ResponseNewParamsToolChoiceUnion{
+				OfAllowedTools: &oairesponses.ToolChoiceAllowedParam{
+					Mode:  oairesponses.ToolChoiceAllowedModeRequired,
 					Type:  constant.AllowedTools("allowed_tools"),
 					Tools: []map[string]any{{"type": "function", "name": "fn1"}},
 				},

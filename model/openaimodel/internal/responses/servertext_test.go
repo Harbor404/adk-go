@@ -21,7 +21,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/openai/openai-go/v3/responses"
+	oairesponses "github.com/openai/openai-go/v3/responses"
 
 	"google.golang.org/adk/v2/model/openaimodel/internal/shared"
 )
@@ -40,10 +40,10 @@ func FuzzFailedResponseError(f *testing.F) {
 	// longest thing %q can produce from one rune.
 	f.Add(strings.Repeat("\U0010ffff", 1<<10), strings.Repeat("\U0010ffff", 1<<10), strings.Repeat("\U0010ffff", 1<<10))
 	f.Fuzz(func(t *testing.T, msg, code, id string) {
-		err := failedResponseError(&responses.Response{
+		err := failedResponseError(&oairesponses.Response{
 			ID:     id,
-			Status: responses.ResponseStatusFailed,
-			Error:  responses.ResponseError{Code: responses.ResponseErrorCode(code), Message: msg},
+			Status: oairesponses.ResponseStatusFailed,
+			Error:  oairesponses.ResponseError{Code: oairesponses.ResponseErrorCode(code), Message: msg},
 		})
 		got := err.Error()
 		for _, r := range got {
@@ -72,10 +72,10 @@ func FuzzFailedResponseError(f *testing.F) {
 // fuzz targets above assert in general.
 func TestFailedResponseError_ServerText(t *testing.T) {
 	t.Run("control characters cannot forge a line", func(t *testing.T) {
-		err := failedResponseError(&responses.Response{
+		err := failedResponseError(&oairesponses.Response{
 			ID:     "resp_1\r\nid forged",
-			Status: responses.ResponseStatusFailed,
-			Error: responses.ResponseError{
+			Status: oairesponses.ResponseStatusFailed,
+			Error: oairesponses.ResponseError{
 				Code:    "server_error\x1b[2J",
 				Message: "line1\r\nERROR forged line 2\tand a tab\x1b[2J",
 			},
@@ -92,9 +92,9 @@ func TestFailedResponseError_ServerText(t *testing.T) {
 	})
 
 	t.Run("line separators cannot forge a line either", func(t *testing.T) {
-		err := failedResponseError(&responses.Response{
-			Status: responses.ResponseStatusFailed,
-			Error:  responses.ResponseError{Message: "before\u2028after\u2029end"},
+		err := failedResponseError(&oairesponses.Response{
+			Status: oairesponses.ResponseStatusFailed,
+			Error:  oairesponses.ResponseError{Message: "before\u2028after\u2029end"},
 		})
 		if got := err.Error(); strings.ContainsRune(got, '\u2028') || strings.ContainsRune(got, '\u2029') {
 			t.Errorf("error %q still carries a raw line separator", got)
@@ -102,9 +102,9 @@ func TestFailedResponseError_ServerText(t *testing.T) {
 	})
 
 	t.Run("a huge message is capped", func(t *testing.T) {
-		err := failedResponseError(&responses.Response{
-			Status: responses.ResponseStatusFailed,
-			Error:  responses.ResponseError{Message: strings.Repeat("A", 1<<20)},
+		err := failedResponseError(&oairesponses.Response{
+			Status: oairesponses.ResponseStatusFailed,
+			Error:  oairesponses.ResponseError{Message: strings.Repeat("A", 1<<20)},
 		})
 		// Runes, because that is the unit the cap counts in.
 		if got, max := utf8.RuneCountInString(err.Error()), shared.MaxServerTextRunes+64; got > max {
@@ -116,10 +116,10 @@ func TestFailedResponseError_ServerText(t *testing.T) {
 	})
 
 	t.Run("a huge id and code are capped", func(t *testing.T) {
-		err := failedResponseError(&responses.Response{
+		err := failedResponseError(&oairesponses.Response{
 			ID:     strings.Repeat("🙂", 1<<16),
-			Status: responses.ResponseStatusFailed,
-			Error:  responses.ResponseError{Code: responses.ResponseErrorCode(strings.Repeat("世", 1<<16))},
+			Status: oairesponses.ResponseStatusFailed,
+			Error:  oairesponses.ResponseError{Code: oairesponses.ResponseErrorCode(strings.Repeat("世", 1<<16))},
 		})
 		// Non-ASCII on purpose. Both runes are printable, so %q emits them as
 		// themselves — one rune, several bytes each — and a bound counted in
@@ -131,9 +131,9 @@ func TestFailedResponseError_ServerText(t *testing.T) {
 
 	t.Run("a short message is quoted, not altered", func(t *testing.T) {
 		const msg = `upstream exploded (code 429): retry`
-		err := failedResponseError(&responses.Response{
-			Status: responses.ResponseStatusFailed,
-			Error:  responses.ResponseError{Message: msg},
+		err := failedResponseError(&oairesponses.Response{
+			Status: oairesponses.ResponseStatusFailed,
+			Error:  oairesponses.ResponseError{Message: msg},
 		})
 		if want := `openai: response failed: "` + msg + `"`; err.Error() != want {
 			t.Errorf("error = %q, want %q", err.Error(), want)
@@ -146,16 +146,16 @@ func TestFailedResponseError_ServerText(t *testing.T) {
 // is a turn: reading the raw value here while the renderer reads the clipped
 // one would discard the output and report a failure naming nothing.
 func TestReportsFailure_WhitespaceOnlyError(t *testing.T) {
-	resp := &responses.Response{
+	resp := &oairesponses.Response{
 		ID: "resp_123",
-		Error: responses.ResponseError{
+		Error: oairesponses.ResponseError{
 			Code:    " \t ",
 			Message: "  \n ",
 		},
-		Output: []responses.ResponseOutputItemUnion{
+		Output: []oairesponses.ResponseOutputItemUnion{
 			{
 				Type: "message",
-				Content: []responses.ResponseOutputMessageContentUnion{
+				Content: []oairesponses.ResponseOutputMessageContentUnion{
 					{Type: "output_text", Text: "a whole answer"},
 				},
 			},

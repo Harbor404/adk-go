@@ -21,7 +21,7 @@ import (
 	"time"
 
 	"github.com/openai/openai-go/v3"
-	"github.com/openai/openai-go/v3/responses"
+	oairesponses "github.com/openai/openai-go/v3/responses"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/internal/llminternal"
@@ -55,7 +55,7 @@ func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stre
 	return m.generate(ctx, params, timeout)
 }
 
-func (m *Model) generate(ctx context.Context, params responses.ResponseNewParams, timeout time.Duration) iter.Seq2[*model.LLMResponse, error] {
+func (m *Model) generate(ctx context.Context, params oairesponses.ResponseNewParams, timeout time.Duration) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		// Shadowed, not reassigned: the closure captures ctx by reference, so
 		// assigning to it would leave the second range over this sequence
@@ -85,7 +85,7 @@ func (m *Model) generate(ctx context.Context, params responses.ResponseNewParams
 	}
 }
 
-func (m *Model) generateStream(ctx context.Context, params responses.ResponseNewParams, timeout time.Duration) iter.Seq2[*model.LLMResponse, error] {
+func (m *Model) generateStream(ctx context.Context, params oairesponses.ResponseNewParams, timeout time.Duration) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		// Shadowed for the same reason as in generate: reassigning the captured
 		// ctx would poison a second range with the first one's cancellation.
@@ -215,7 +215,7 @@ func (m *Model) generateStream(ctx context.Context, params responses.ResponseNew
 // the response it carried repeated: a "response.incomplete" declares a turn cut
 // short even when its payload reports no status and no reason.
 type terminalEvent struct {
-	resp *responses.Response
+	resp *oairesponses.Response
 	// seen is set by a terminal event, the only kind that says why the turn
 	// ended. It implies resp != nil.
 	seen       bool
@@ -237,7 +237,7 @@ func (t terminalEvent) completed() bool {
 // having decoded stands for the object's presence; testing "id" alone would
 // also reject a populated response that merely omits it. A bare "{}" leaves
 // every raw value empty and is still rejected.
-func carriesResponse(resp *responses.Response) bool {
+func carriesResponse(resp *oairesponses.Response) bool {
 	j := &resp.JSON
 	return j.ID.Valid() || j.Status.Valid() || j.Output.Valid() ||
 		j.IncompleteDetails.Valid() || j.Error.Valid() || j.Model.Valid()
@@ -258,7 +258,7 @@ func adoptTerminalCalls(final *model.LLMResponse, term terminalEvent) error {
 	if !term.seen {
 		return nil
 	}
-	var items []responses.ResponseOutputItemUnion
+	var items []oairesponses.ResponseOutputItemUnion
 	for _, item := range term.resp.Output {
 		if item.Type == "function_call" {
 			items = append(items, item)
@@ -366,7 +366,7 @@ func adoptTerminalCalls(final *model.LLMResponse, term terminalEvent) error {
 // [namesAgree] gates every tier, so arguments never cross from one tool to
 // another. Two calls to one tool, reordered and identified by neither, stay out
 // of reach: nothing tells them apart.
-func streamedCounterpart(item responses.ResponseOutputItemUnion, nth int, streamed []*genai.FunctionCall, paired bool) *genai.FunctionCall {
+func streamedCounterpart(item oairesponses.ResponseOutputItemUnion, nth int, streamed []*genai.FunctionCall, paired bool) *genai.FunctionCall {
 	if item.CallID != "" {
 		for _, call := range streamed {
 			if call.ID == item.CallID && namesAgree(item, call) {
@@ -399,7 +399,7 @@ func streamedCounterpart(item responses.ResponseOutputItemUnion, nth int, stream
 
 // namesAgree reports whether a terminal item and a streamed call name the same
 // tool, counting a name either side leaves out as no disagreement.
-func namesAgree(item responses.ResponseOutputItemUnion, call *genai.FunctionCall) bool {
+func namesAgree(item oairesponses.ResponseOutputItemUnion, call *genai.FunctionCall) bool {
 	return item.Name == "" || call.Name == "" || call.Name == item.Name
 }
 
@@ -407,7 +407,7 @@ func namesAgree(item responses.ResponseOutputItemUnion, call *genai.FunctionCall
 // ahead of anything else it would turn into a part. Which text part a call
 // belongs before cannot be read off the event, since the deltas concatenate
 // into parts of their own; whether it comes first can.
-func eventLeadsWithCall(items []responses.ResponseOutputItemUnion) bool {
+func eventLeadsWithCall(items []oairesponses.ResponseOutputItemUnion) bool {
 	for _, item := range items {
 		switch item.Type {
 		case "function_call":
@@ -501,7 +501,7 @@ const FinishMessageKey = "openai_finish_message"
 // read uses the error fields. genai's PromptFeedback suits neither branch: the
 // framework converter reads it only for a response with no candidates, and
 // convertResponse always emits one.
-func attachFinishSignal(resp *model.LLMResponse, openaiResp *responses.Response, incompleteEvent bool) {
+func attachFinishSignal(resp *model.LLMResponse, openaiResp *oairesponses.Response, incompleteEvent bool) {
 	if resp == nil || openaiResp == nil {
 		return
 	}
@@ -531,7 +531,7 @@ func attachFinishSignal(resp *model.LLMResponse, openaiResp *responses.Response,
 	resp.ErrorMessage = msg
 }
 
-func attachMetadata(resp *model.LLMResponse, openaiResp *responses.Response) {
+func attachMetadata(resp *model.LLMResponse, openaiResp *oairesponses.Response) {
 	if resp == nil || openaiResp == nil {
 		return
 	}
