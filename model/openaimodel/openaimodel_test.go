@@ -18,7 +18,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -270,17 +269,12 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
-// newLoopbackServer serves handler on IPv4 loopback, which the sandboxes these
-// tests run in allow where the default listener's IPv6 may be refused.
+// newLoopbackServer starts handler on a loopback port and closes it when the
+// test ends. httptest binds 127.0.0.1 before trying IPv6, so a sandbox refusing
+// IPv6 is served as well.
 func newLoopbackServer(t *testing.T, handler http.HandlerFunc) *httptest.Server {
 	t.Helper()
-	server := httptest.NewUnstartedServer(handler)
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	server.Listener = ln
-	server.Start()
+	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
 	return server
 }

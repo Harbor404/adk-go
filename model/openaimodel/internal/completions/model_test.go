@@ -19,7 +19,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -45,14 +44,13 @@ type testRig struct {
 func newTestRig(t *testing.T, handler func(w http.ResponseWriter, r *http.Request)) *testRig {
 	t.Helper()
 	rig := &testRig{}
-	rig.server = newLocalhostServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	rig.server = newLoopbackServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// ReadAll rather than one Read, which may return part of the body.
 		body, _ := io.ReadAll(r.Body)
 		rig.paths = append(rig.paths, r.URL.Path)
 		rig.requests = append(rig.requests, string(body))
 		handler(w, r)
 	}))
-	t.Cleanup(rig.server.Close)
 	return rig
 }
 
@@ -611,17 +609,13 @@ func responseText(resp *model.LLMResponse) string {
 	return b.String()
 }
 
-// newLocalhostServer starts an httptest.Server bound to IPv4 loopback, since
-// some sandboxes forbid IPv6 listeners.
-func newLocalhostServer(t *testing.T, handler http.Handler) *httptest.Server {
+// newLoopbackServer starts handler on a loopback port and closes it when the
+// test ends. httptest binds 127.0.0.1 before trying IPv6, so a sandbox refusing
+// IPv6 is served as well.
+func newLoopbackServer(t *testing.T, handler http.HandlerFunc) *httptest.Server {
 	t.Helper()
-	server := httptest.NewUnstartedServer(handler)
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("failed to listen on IPv4 loopback: %v", err)
-	}
-	server.Listener = ln
-	server.Start()
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
 	return server
 }
 

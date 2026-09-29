@@ -18,7 +18,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -38,7 +37,7 @@ import (
 )
 
 func TestModel_Generate(t *testing.T) {
-	server := newLocalhostServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newLoopbackServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/responses" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
@@ -47,7 +46,6 @@ func TestModel_Generate(t *testing.T) {
 			t.Errorf("failed to write mock response: %v", err)
 		}
 	}))
-	defer server.Close()
 
 	clientCfg := &testClientConfig{
 		APIKey:     "test",
@@ -178,7 +176,7 @@ func TestModel_FailedStatus_PathsAgree(t *testing.T) {
 }
 
 func TestModel_GenerateStream_Metadata(t *testing.T) {
-	server := newLocalhostServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newLoopbackServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/responses" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
@@ -197,7 +195,6 @@ func TestModel_GenerateStream_Metadata(t *testing.T) {
 			_, _ = fmt.Fprintf(w, "data: %s\n\n", evt)
 		}
 	}))
-	defer server.Close()
 
 	clientCfg := &testClientConfig{
 		APIKey:     "test",
@@ -305,24 +302,22 @@ func incompleteEvent(fields string) string {
 // it emits, so a test can assert on the shape of the whole turn.
 func runStream(t *testing.T, events ...string) ([]*model.LLMResponse, error) {
 	t.Helper()
-	server := newLocalhostServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newLoopbackServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		for _, evt := range append(events, "[DONE]") {
 			_, _ = fmt.Fprintf(w, "data: %s\n\n", evt)
 		}
 	}))
-	defer server.Close()
 	return collectResponses(t, server, true)
 }
 
 // runBlocking is runStream's non-streaming counterpart, for parity assertions.
 func runBlocking(t *testing.T, body string) ([]*model.LLMResponse, error) {
 	t.Helper()
-	server := newLocalhostServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newLoopbackServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = fmt.Fprint(w, body)
 	}))
-	defer server.Close()
 	return collectResponses(t, server, false)
 }
 
@@ -939,7 +934,7 @@ func TestModel_GenerateStream_StopsWhenTheConsumerStops(t *testing.T) {
 	// The handler blocks after the first delta, so a consumer that breaks does
 	// so mid-turn with the response still open.
 	release := make(chan struct{})
-	server := newLocalhostServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newLoopbackServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		for _, evt := range []string{evCreated, evDelta1} {
 			_, _ = fmt.Fprintf(w, "data: %s\n\n", evt)
@@ -950,7 +945,6 @@ func TestModel_GenerateStream_StopsWhenTheConsumerStops(t *testing.T) {
 		case <-r.Context().Done():
 		}
 	}))
-	defer server.Close()
 	defer close(release)
 
 	client := server.Client()
@@ -2290,16 +2284,13 @@ func allText(content *genai.Content) string {
 	return text
 }
 
-// newLocalhostServer starts httptest.Server bound to IPv4 loopback since some sandboxes forbid IPv6 listeners.
-func newLocalhostServer(t *testing.T, handler http.Handler) *httptest.Server {
+// newLoopbackServer starts handler on a loopback port and closes it when the
+// test ends. httptest binds 127.0.0.1 before trying IPv6, so a sandbox refusing
+// IPv6 is served as well.
+func newLoopbackServer(t *testing.T, handler http.HandlerFunc) *httptest.Server {
 	t.Helper()
-	server := httptest.NewUnstartedServer(handler)
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("failed to listen on IPv4 loopback: %v", err)
-	}
-	server.Listener = ln
-	server.Start()
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
 	return server
 }
 
@@ -2325,7 +2316,7 @@ func TestModel_GenerateContent_DoesNotSendReplayedReasoning(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			var body string
-			server := newLocalhostServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			server := newLoopbackServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				raw, err := io.ReadAll(r.Body)
 				if err != nil {
 					t.Errorf("reading request body: %v", err)
@@ -2341,7 +2332,6 @@ func TestModel_GenerateContent_DoesNotSendReplayedReasoning(t *testing.T) {
 				w.Header().Set("Content-Type", "application/json")
 				_, _ = fmt.Fprint(w, bodyCompleted)
 			}))
-			defer server.Close()
 
 			ctx := t.Context()
 			llm := newTestModel(openai.ChatModelGPT4oMini, &testClientConfig{
@@ -2380,11 +2370,10 @@ func TestModel_GenerateContent_ThoughtOnlyRequestFailsBeforeSending(t *testing.T
 		}
 		t.Run(name, func(t *testing.T) {
 			var calls int
-			server := newLocalhostServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			server := newLoopbackServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				calls++
 				t.Errorf("model was called with an emptied request")
 			}))
-			defer server.Close()
 
 			ctx := t.Context()
 			llm := newTestModel(openai.ChatModelGPT4oMini, &testClientConfig{
