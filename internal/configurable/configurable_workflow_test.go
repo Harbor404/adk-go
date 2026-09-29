@@ -601,14 +601,14 @@ func init() {
 }
 
 func TestParseEdges_RouteOrderIsDeterministic(t *testing.T) {
-	// What keeps this red against a bare range is how far the declaration
-	// sits from sorted order, not the number of routes. Twelve entries do
-	// spill out of the single eight-slot group a smaller map lives in, but
-	// iteration can still land on sorted order when the declaration is close
-	// to it. Measured on go1.26.6 over a million draws: these keys declared
-	// sorted came out sorted 2674 times, and sorted with one adjacent pair
-	// swapped 112 times. The declaration below came out sorted not once.
-	// Keep it scrambled.
+	// A bare range cannot pass this test by luck, and the declaration order
+	// below is what guarantees it. On go1.26 twelve entries sit in two map
+	// groups, each keeping its keys in declaration order, so a bare range
+	// yields sorted order only when the sorted keys split into a prefix of
+	// four to eight keys and a remainder, each declared in ascending order.
+	// Every such prefix holds both "10" and "2", which sort in that order,
+	// but "2" is declared first, so no such split exists. Keep "2" declared
+	// ahead of "10".
 	//
 	// Three key choices pin which order, not just that there is one:
 	// "10" before "2" separates byte order from numeric, "zulu" after
