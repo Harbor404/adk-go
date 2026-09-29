@@ -488,6 +488,27 @@ func TestChatModel_GenerateStream_UnsupersededSnapshotKeepsCalls(t *testing.T) {
 	}
 }
 
+// TestChatModel_GenerateStream_SparseToolIndex covers a stream whose first
+// tool-call delta uses index 1. The accumulator pads index 0 with an empty
+// entry, which must not reach the caller as a call with no name.
+func TestChatModel_GenerateStream_SparseToolIndex(t *testing.T) {
+	rig := newChatRig(t, chatSSE(
+		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":1,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Lisbon\"}"}}]}}]}`,
+		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+	))
+	got, err := askChat(t, rig.model(t), true)
+	if err != nil {
+		t.Fatalf("GenerateContent() err = %v", err)
+	}
+	final := got[len(got)-1]
+	if n := len(final.Content.Parts); n != 1 {
+		t.Fatalf("parts = %d, want only the get_weather call", n)
+	}
+	if call := onlyCall(t, final); call.ID != "call_1" || call.Name != "get_weather" {
+		t.Errorf("call = %#v, want call_1 to get_weather", call)
+	}
+}
+
 func TestChatModel_GenerateStream_ErrorMidStream(t *testing.T) {
 	rig := newChatRig(t, chatSSE(
 		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"hail "}}]}`,
