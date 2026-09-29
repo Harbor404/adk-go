@@ -221,8 +221,10 @@ func (t *authTransport) credential(ctx context.Context) (auth.Credential, error)
 // copied onto h only once the step has landed, so a caller released by its
 // deadline never races the writer.
 func (t *authTransport) apply(ctx context.Context, cred auth.Credential, h http.Header) error {
-	// The scope keys the single-flight. Without one there is no identity to
-	// share a step with, so this request runs its own.
+	// The scope keys the single-flight. Every request this package sends
+	// carries one, so this fallback is not reached today. It keeps a request
+	// that one day arrives without a scope from sharing a step, and so a
+	// credential, with every other unscoped request.
 	scope, ok := a2aclient.SessionIDFrom(ctx)
 	mints, applies := t.mints, t.applies
 	if !ok {
@@ -372,14 +374,20 @@ type mintGroup[T any] struct {
 // mintCall is one in-flight step. value and err are written once, before done
 // closes, and read only after it.
 //
-// deadline is the attempt's, not any one waiter's. A caller arriving midway
+// deadline is the attempt's, not any one waiter's: a caller arriving midway
 // through a stuck step waits out what is left of it rather than arming a fresh
-// mintTimeout of its own, and one arriving after it has passed retires the
-// attempt and starts a new one. Without that, a token endpoint that hangs once
-// would wedge its scope for the life of the process: Token() cannot be
-// interrupted, so the entry would never be removed and every later request for
-// that identity would join a step that can never finish. auth/gcp's provider
-// reached the same design for the same reason.
+// mintTimeout of its own. auth/gcp's provider bounds its waiters the same way.
+//
+// Past the deadline the two part ways. auth/gcp keeps a hung attempt and fails
+// later callers at once, because its lookup eventually returns and publishes,
+// and retiring it would park a new goroutine every initTimeout. This group
+// retires it and starts a new step, and so pays exactly that cost: while a
+// token endpoint hangs, one more goroutine per scope stays parked every
+// mintTimeout. The reason is that nothing here promises the step returns.
+// Token() takes no context, and the JWT and ADC sources post through
+// http.DefaultClient, which has no timeout, so a step that is kept could hold
+// its scope's entry for the life of the process and lock that identity out
+// even after the endpoint recovers.
 type mintCall[T any] struct {
 	done     chan struct{}
 	deadline time.Time
@@ -484,7 +492,7 @@ func (g *mintGroup[T]) run(scope a2aclient.SessionID, call *mintCall[T], step fu
 	defer func() {
 		// The step is third-party code on a goroutine of our own, where a panic
 		// is fatal rather than something the runner's recover can turn into an
-		// error. auth/gcp's provider guards its own callback the same way.
+		// error. auth/gcp's provider guards its background lookup the same way.
 		if r := recover(); r != nil {
 			call.err = fmt.Errorf("remoteagent: %s: credential panicked: %v", g.what, r)
 		}

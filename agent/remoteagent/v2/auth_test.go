@@ -498,9 +498,8 @@ func TestRemoteAgent_AuthUnsetLeavesTheContextAlone(t *testing.T) {
 }
 
 // TestRemoteAgent_AuthRefusesCrossOriginRedirect covers redirect hardening. The
-// credential is attached before the first hop and Go replays headers on each
-// redirect, never stripping a card-named API-key header, so the client must
-// refuse to leave the card's origin.
+// transport applies the credential again on every hop, whatever header the
+// credential names, so the client must refuse to leave the card's origin.
 func TestRemoteAgent_AuthRefusesCrossOriginRedirect(t *testing.T) {
 	var mu sync.Mutex
 	var elsewhereSawKey string
@@ -2281,10 +2280,11 @@ type applyFunc func(http.Header) error
 
 func (f applyFunc) Apply(h http.Header) error { return f(h) }
 
-// TestAuthTransportUnscopedMintsDoNotShare pins that a request with no scope —
-// one made outside any invocation, like the cancel an adka2a server issues
-// without Auth ownership — never joins another request's mint. Keyed on the
-// empty scope, every such request would share one mint and one token.
+// TestAuthTransportUnscopedMintsDoNotShare pins the fallback for a request that
+// reaches the transport without a scope. No path in this SDK sends one today —
+// every call made with Auth set carries a scope — so this guards a future one:
+// keyed on the empty scope, every such request would share one mint and one
+// token.
 func TestAuthTransportUnscopedMintsDoNotShare(t *testing.T) {
 	release := make(chan struct{})
 	entered := make(chan struct{})
@@ -2319,8 +2319,8 @@ func TestAuthTransportUnscopedMintsDoNotShare(t *testing.T) {
 }
 
 // TestAuthTransportUnscopedAppliesDoNotShare is the Apply-path twin of the test
-// above: two unscoped requests with different credentials must each write
-// their own, however long the other one's Apply takes.
+// above, for the same future request: two unscoped requests with different
+// credentials must each write their own, however long the other's Apply takes.
 func TestAuthTransportUnscopedAppliesDoNotShare(t *testing.T) {
 	release := make(chan struct{})
 	entered := make(chan struct{})
@@ -2446,4 +2446,70 @@ func TestAuthTransportBoundsAWrappedOAuth2Credential(t *testing.T) {
 			t.Errorf("headers = %v, want both the bearer token and the extra header", h)
 		}
 	})
+}
+
+// TestAuthTransportKeysEachStepOnTheRequestScope pins that apply hands the
+// request's own scope to both single-flight groups. The groups are tested
+// directly elsewhere, but only this shows the transport feeds them the right
+// key: keyed on anything shared, bob's request would join alice's in-flight
+// step and go out with her token. Both the mint and the Apply path are driven,
+// with the two identities overlapping.
+func TestAuthTransportKeysEachStepOnTheRequestScope(t *testing.T) {
+	alice := a2aclient.AttachSessionID(context.WithoutCancel(t.Context()), iremoteagent.CredentialScope("shop", "alice", "s1", "crm"))
+	bob := a2aclient.AttachSessionID(context.WithoutCancel(t.Context()), iremoteagent.CredentialScope("shop", "bob", "s1", "crm"))
+
+	tests := []struct {
+		name       string
+		held, fast func(release, entered chan struct{}) auth.Credential
+	}{
+		{
+			name: "oauth2 mint",
+			held: func(release, entered chan struct{}) auth.Credential {
+				return auth.OAuth2Credential{TokenSource: tokenSourceFunc(func() (*oauth2.Token, error) {
+					close(entered)
+					<-release
+					return &oauth2.Token{AccessToken: "alice"}, nil
+				})}
+			},
+			fast: func(chan struct{}, chan struct{}) auth.Credential {
+				return auth.OAuth2Credential{TokenSource: oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "bob"})}
+			},
+		},
+		{
+			name: "credential Apply",
+			held: func(release, entered chan struct{}) auth.Credential {
+				return applyFunc(func(h http.Header) error {
+					close(entered)
+					<-release
+					h.Set("Authorization", "Bearer alice")
+					return nil
+				})
+			},
+			fast: func(chan struct{}, chan struct{}) auth.Credential { return auth.BearerCredential{Token: "bob"} },
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			release, entered := make(chan struct{}), make(chan struct{})
+			tr := &authTransport{mints: newMintGroup(), applies: newApplyGroup()}
+			go func() { _ = tr.apply(alice, tc.held(release, entered), http.Header{}) }()
+			<-entered
+			defer close(release)
+
+			h := http.Header{}
+			done := make(chan error, 1)
+			go func() { done <- tr.apply(bob, tc.fast(nil, nil), h) }()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatalf("apply() error = %v", err)
+				}
+				if got := h.Get("Authorization"); got != "Bearer bob" {
+					t.Errorf("bob's Authorization = %q, want %q", got, "Bearer bob")
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("bob's request joined alice's in-flight step")
+			}
+		})
+	}
 }

@@ -148,7 +148,7 @@ func TestCancelChildInputRequiredTasksAuthenticatesCancel(t *testing.T) {
 	// Two events the cancel scan matches on, each authored by the remote
 	// subagent and carrying its own pending call and remote task id. Two,
 	// because one leaves the executor's client cache always missing, and the
-	// card it re-attaches on a cache hit comes from a different place.
+	// second cancel then goes through the cached client.
 	var statusParts []*a2a.Part
 	for _, seed := range []struct{ callID, taskID string }{{callID, taskID}, {callID2, taskID2}} {
 		event := session.NewEvent(ctx, "invocation")
@@ -314,4 +314,84 @@ func peekJSONRPCMethod(r *http.Request) string {
 	}
 	_ = json.Unmarshal(body, &rpc)
 	return rpc.Method
+}
+
+// TestCancelChildInputRequiredTasksCustomProviderContext pins what the
+// ClientProvider doc and NewA2A's error now tell a caller about the second
+// place their provider is called. The adka2a cancel passes the server's own
+// request context, which is not an agent.InvocationContext and carries no
+// scope, so a provider must check its type assertion. One that does, and falls
+// back, still gets its CancelTask out.
+func TestCancelChildInputRequiredTasksCustomProviderContext(t *testing.T) {
+	const (
+		appName   = "app"
+		agentName = "remote"
+		contextID = "ctx-1"
+		taskID    = "task-1"
+		callID    = "call-1"
+	)
+	userID, sessionID := "A2A_USER_"+contextID, contextID
+
+	var mu sync.Mutex
+	methods := map[string]int{}
+	inner := a2asrv.NewJSONRPCHandler(a2asrv.NewHandler(cancelOnlyExecutor{}))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		methods[peekJSONRPCMethod(r)]++
+		mu.Unlock()
+		inner.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+	card := &a2a.AgentCard{
+		Name:                agentName,
+		SupportedInterfaces: []*a2a.AgentInterface{a2a.NewAgentInterface(srv.URL, a2a.TransportProtocolJSONRPC)},
+	}
+	factory := a2aclient.NewFactory()
+
+	var sawInvocation, sawScope bool
+	remoteCfg := &iremoteagent.A2AServerConfig{
+		AgentCard: card,
+		// A custom provider: OwnsAuthScope stays false, as NewA2A leaves it.
+		ClientProvider: clientProviderFunc(func(ctx context.Context, c *a2a.AgentCard) (iremoteagent.A2AClient, error) {
+			_, sawInvocation = ctx.(agent.InvocationContext)
+			_, sawScope = a2aclient.SessionIDFrom(ctx)
+			return factory.CreateFromCard(ctx, c)
+		}),
+	}
+
+	ctx := t.Context()
+	svc := session.InMemoryService()
+	created, err := svc.Create(ctx, &session.CreateRequest{AppName: appName, UserID: userID, SessionID: sessionID})
+	if err != nil {
+		t.Fatalf("sessionService.Create() error = %v", err)
+	}
+	event := session.NewEvent(ctx, "invocation")
+	event.Author = agentName
+	event.Content = &genai.Content{
+		Role:  string(genai.RoleModel),
+		Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: callID, Name: "ask"}}},
+	}
+	event.CustomMetadata = map[string]any{customMetaTaskIDKey: taskID, customMetaContextIDKey: contextID}
+	if err := svc.AppendEvent(ctx, created.Session, event); err != nil {
+		t.Fatalf("sessionService.AppendEvent() error = %v", err)
+	}
+	statusParts, err := ToA2AParts(event.Content.Parts, nil)
+	if err != nil {
+		t.Fatalf("ToA2AParts() error = %v", err)
+	}
+	status := a2a.TaskStatus{State: a2a.TaskStateInputRequired, Message: a2a.NewMessage(a2a.MessageRoleAgent, statusParts...)}
+	cfg := RunnerConfig{AppName: appName, Agent: newRemoteStateAgent(t, agentName, remoteCfg), SessionService: svc}
+	_ = (&Executor{}).cancelChildInputRequiredTasks(ctx, &a2asrv.ExecutorContext{ContextID: contextID}, status, cfg, findRemoteSubagents(cfg.Agent))
+
+	mu.Lock()
+	defer mu.Unlock()
+	if sawInvocation {
+		t.Error("the provider got an agent.InvocationContext; the docs that tell callers to check the assertion here are out of date")
+	}
+	if sawScope {
+		t.Error("the provider got a credential scope without Auth ownership; a caller's own interceptor could be fed a key it never chose")
+	}
+	if methods["CancelTask"] != 1 {
+		t.Errorf("CancelTask reached the remote %d times, want 1", methods["CancelTask"])
+	}
 }

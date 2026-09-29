@@ -340,12 +340,20 @@ type A2AConfig struct {
 	// It cannot be combined with Auth, so nothing this package attaches for
 	// auth reaches it: neither the context it receives nor the one its client
 	// receives per call carries a credential scope. A provider doing its own
-	// auth computes one from the context it receives, which is the ADK
-	// invocation context, and has its client attach it to every call.
-	// CredentialScope builds the key this package would have used. The
-	// per-call contexts are not all an agent.InvocationContext — the cleanup
-	// CancelTask's is a plain detached one — so the scope has to be captured
-	// when the client is built.
+	// auth works out the identity itself, and CredentialScope builds the key
+	// this package would have used.
+	//
+	// The provider is called from two places, and only one of them has an
+	// invocation. When this agent runs, the provider receives the ADK
+	// invocation context, so it can compute CredentialScope(ctx.Session(),
+	// name) there and have its client attach the scope to every call, the
+	// cleanup CancelTask included — that call's own context is a plain
+	// detached one, so the scope has to be captured when the client is built.
+	// When an adka2a server hosting this agent cancels an abandoned child task,
+	// it calls the provider with its own request context, which is not an
+	// agent.InvocationContext and carries no scope. Check the type assertion
+	// rather than making it unconditionally, and identify the caller from that
+	// request instead.
 	ClientProvider A2AClientProvider
 
 	// Auth, when set, resolves an end-user credential and applies it to every
@@ -430,7 +438,7 @@ func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 		return nil, fmt.Errorf("A2AConfig.Auth holds a nil %T; leave the field unset instead", cfg.Auth)
 	}
 	if cfg.Auth != nil && cfg.ClientProvider != nil {
-		return nil, fmt.Errorf("A2AConfig.Auth cannot be combined with a custom ClientProvider; wire the credential into your ClientProvider instead. The context the provider receives is the ADK invocation context, so compute remoteagent.CredentialScope(ctx.Session(), name) there and have the client it returns attach that with a2aclient.AttachSessionID on every call, the cleanup CancelTask included. Do not read it back from each call's context, which is not an agent.InvocationContext on every call")
+		return nil, fmt.Errorf("A2AConfig.Auth cannot be combined with a custom ClientProvider; wire the credential into your ClientProvider instead. When this agent runs, the context the provider receives is the ADK invocation context: compute remoteagent.CredentialScope(ctx.Session(), name) there and have the client it returns attach it with a2aclient.AttachSessionID on every call, the cleanup CancelTask included. An adka2a server cancelling an abandoned child task calls the provider with its own request context instead, which is not an agent.InvocationContext, so check the assertion. See A2AConfig.ClientProvider")
 	}
 	var authClient, cardClient *http.Client
 	if cfg.ClientProvider == nil {
