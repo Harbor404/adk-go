@@ -2410,7 +2410,7 @@ type testClientConfig struct {
 }
 
 // newTestModel builds a Model from cfg. NewModel's own option handling is
-// tested in the parent package, through the constructor callers use.
+// tested in package openaimodel, through the constructor callers use.
 func newTestModel(modelName string, cfg *testClientConfig) model.LLM {
 	opts := []option.RequestOption{option.WithAPIKey(cfg.APIKey), option.WithBaseURL(cfg.BaseURL)}
 	if cfg.HTTPClient != nil {

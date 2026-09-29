@@ -619,8 +619,8 @@ func newLoopbackServer(t *testing.T, handler http.HandlerFunc) *httptest.Server 
 	return server
 }
 
-// newTestModel builds a model pointed at the test server, the way the
-// parent package's NewModel does for APIChatCompletions.
+// newTestModel builds a model pointed at the test server, the way
+// openaimodel.NewModel does for APIChatCompletions.
 func newTestModel(t *testing.T, server *httptest.Server) model.LLM {
 	t.Helper()
 	client := openai.NewClient(

@@ -40,7 +40,7 @@ func RequestTimeout(cfg *genai.GenerateContentConfig) time.Duration {
 	return *cfg.HTTPOptions.Timeout
 }
 
-// IgnoredHTTPOptionFields names the HTTPOptions fields this package neither
+// IgnoredHTTPOptionFields names the HTTPOptions fields neither endpoint
 // translates nor rejects: forwarding a header would let a caller's
 // Authorization displace the configured API key and carry a Gemini credential
 // to OpenAI, while refusing one would break the configs model/gemini fills in
@@ -51,7 +51,7 @@ func RequestTimeout(cfg *genai.GenerateContentConfig) time.Duration {
 var IgnoredHTTPOptionFields = []string{"Headers"}
 
 // UnsupportedHTTPOptionFields lists the HTTPOptions fields that describe the
-// Gemini wire format rather than transport, and so cannot cross to Responses.
+// Gemini wire format rather than transport, and so cannot cross to OpenAI.
 // Unlike IgnoredHTTPOptionFields these have never been accepted here, so naming
 // them costs no compatibility.
 var UnsupportedHTTPOptionFields = []struct {
@@ -71,7 +71,7 @@ var UnsupportedHTTPOptionFields = []struct {
 	{Name: "RetryOptions", IsSet: func(o *genai.HTTPOptions) bool { return o.RetryOptions != nil }},
 }
 
-// ReasoningEfforts maps every genai thinking level onto a Responses reasoning
+// ReasoningEfforts maps every genai thinking level onto an OpenAI reasoning
 // effort. An explicit THINKING_LEVEL_UNSPECIFIED is distinct from unset and
 // still asks the model to think, so it resolves to medium as adk-python does —
 // unlike a dynamic budget, which has no such precedent and defers to the model.
@@ -161,7 +161,7 @@ func RejectUntranslatableValues(cfg *genai.GenerateContentConfig) error {
 		return fmt.Errorf("%w: negative MaxOutputTokens", ErrUnsupportedConfigField)
 	case cfg.CandidateCount < 0:
 		// Above one is ErrMultipleCandidatesNotSupported; zero and one both mean
-		// the single candidate Responses returns. Below zero means nothing.
+		// the single candidate either endpoint asks for. Below zero means nothing.
 		return fmt.Errorf("%w: negative CandidateCount", ErrUnsupportedConfigField)
 	}
 	// HTTPOptions is taken field by field rather than whole. Timeout is
@@ -184,8 +184,9 @@ func RejectUntranslatableValues(cfg *genai.GenerateContentConfig) error {
 	return nil
 }
 
-// UnsupportedConfigFields lists the GenerateContentConfig fields this package
-// cannot translate, each with a predicate reporting whether the caller set it.
+// UnsupportedConfigFields lists the GenerateContentConfig fields the Responses
+// API cannot take, each with a predicate reporting whether the caller set it;
+// the Chat Completions path removes the ones it can with ConfigFieldsWithout.
 // Presence, not value: setting a knob at all means the caller expected an effect.
 var UnsupportedConfigFields = []ConfigField{
 	{Name: "Seed", IsSet: func(c *genai.GenerateContentConfig) bool { return c.Seed != nil }},
