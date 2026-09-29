@@ -28,7 +28,7 @@ import (
 	"google.golang.org/adk/v2/internal/llminternal/converters"
 	"google.golang.org/adk/v2/model"
 
-	"google.golang.org/adk/v2/model/openaimodel/internal/openaicommon"
+	"google.golang.org/adk/v2/model/openaimodel/internal/shared"
 )
 
 type Model struct {
@@ -42,13 +42,13 @@ func (m *Model) Name() string { return m.name }
 // then calls the OpenAI API. It handles both streaming and non-streaming responses.
 func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	if req == nil {
-		return openaicommon.SingleErrorSequence(openaicommon.ErrRequestNil)
+		return shared.SingleErrorSequence(shared.ErrRequestNil)
 	}
 	params, err := buildParams(m.name, req)
 	if err != nil {
-		return openaicommon.SingleErrorSequence(err)
+		return shared.SingleErrorSequence(err)
 	}
-	timeout := openaicommon.RequestTimeout(req.Config)
+	timeout := shared.RequestTimeout(req.Config)
 	if stream {
 		return m.generateStream(ctx, params, timeout)
 	}
@@ -166,7 +166,7 @@ func (m *Model) generateStream(ctx context.Context, params responses.ResponseNew
 		}
 
 		final := aggregator.Close()
-		if !openaicommon.CarriesContent(final) && term.seen {
+		if !shared.CarriesContent(final) && term.seen {
 			// The deltas contributed nothing that survived aggregation, but the
 			// terminal event can still hold the whole turn: a batched message,
 			// or a tool call the aggregator dropped. Rebuild it the way the
@@ -175,7 +175,7 @@ func (m *Model) generateStream(ctx context.Context, params responses.ResponseNew
 			switch {
 			case err == nil:
 				final = converters.Genai2LLMResponse(genaiResp)
-			case final != nil && openaicommon.IsEmptyOutput(err):
+			case final != nil && shared.IsEmptyOutput(err):
 				// Nothing to rebuild from, but the aggregator did produce a
 				// turn: report it with the reason the event carries rather than
 				// failing a call the model answered. A truncated turn is
@@ -193,7 +193,7 @@ func (m *Model) generateStream(ctx context.Context, params responses.ResponseNew
 			// omits content that was already streamed.
 			if genaiResp, err := convertResponse(term.resp); err == nil {
 				content := genaiResp.Candidates[0].Content
-				if openaicommon.CompletedContentSupersedes(final.Content, content) {
+				if shared.CompletedContentSupersedes(final.Content, content) {
 					final.Content = content
 				}
 			}
@@ -268,7 +268,7 @@ func adoptTerminalCalls(final *model.LLMResponse, term terminalEvent) error {
 		// Naming no calls says nothing about them: what streamed stands.
 		return nil
 	}
-	kept, streamedCalls, at := openaicommon.PartsWithoutCalls(final.Content)
+	kept, streamedCalls, at := shared.PartsWithoutCalls(final.Content)
 	if term.incomplete && len(items) < len(streamedCalls) {
 		// Only a completed response states the turn's whole output. A shorter
 		// list on an incomplete one is the truncation showing, so replacing
@@ -459,7 +459,7 @@ func restoreUnstated(part *genai.Part, streamed *genai.FunctionCall, argsUsable,
 
 // finalizeStreamResponse closes out a streamed turn on the aggregated response.
 //
-// Deltas carry no finish reason (see openaicommon.SinglePartResponse), so this is the one
+// Deltas carry no finish reason (see shared.SinglePartResponse), so this is the one
 // response that marks the turn complete, and the last point where the terminal
 // OpenAI response is in reach — hence the fields copied here, which are what
 // let a streamed turn report what the same turn reports unstreamed. An erroring
@@ -481,7 +481,7 @@ func finalizeStreamResponse(final *model.LLMResponse, term terminalEvent) {
 	// term.seen implies term.resp != nil.
 	final.UsageMetadata = convertUsage(term.resp.Usage)
 	final.FinishReason = finishReason(term.resp, term.incomplete)
-	final.LogprobsResult = logprobsFor(term.resp, openaicommon.AnswerText(final.Content))
+	final.LogprobsResult = logprobsFor(term.resp, shared.AnswerText(final.Content))
 	attachFinishSignal(final, term.resp, term.incomplete)
 }
 
@@ -512,7 +512,7 @@ func attachFinishSignal(resp *model.LLMResponse, openaiResp *responses.Response,
 		return
 	}
 	msg := finishMessage(openaiResp, incompleteEvent)
-	if openaicommon.CarriesContent(resp) {
+	if shared.CarriesContent(resp) {
 		if msg != "" {
 			if resp.CustomMetadata == nil {
 				resp.CustomMetadata = map[string]any{}

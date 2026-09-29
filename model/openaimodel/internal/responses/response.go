@@ -22,14 +22,14 @@ import (
 	"github.com/openai/openai-go/v3/responses"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/v2/model/openaimodel/internal/openaicommon"
+	"google.golang.org/adk/v2/model/openaimodel/internal/shared"
 )
 
 // convertResponse takes an OpenAI API response and transforms it into our
 // generic genai.GenerateContentResponse format.
 func convertResponse(resp *responses.Response) (*genai.GenerateContentResponse, error) {
 	if resp == nil {
-		return nil, openaicommon.ErrEmptyResponse
+		return nil, shared.ErrEmptyResponse
 	}
 	if reportsFailure(resp) {
 		return nil, failedResponseError(resp)
@@ -59,7 +59,7 @@ func reportsFailure(resp *responses.Response) bool {
 		// Clipped, not raw: the renderer reports what clipping leaves, so a
 		// predicate reading the raw value would send a body whose error is
 		// nothing but whitespace down the failure path and then name nothing.
-		return openaicommon.ClipServerText(resp.Error.Message) != "" || openaicommon.ClipServerText(string(resp.Error.Code)) != ""
+		return shared.ClipServerText(resp.Error.Message) != "" || shared.ClipServerText(string(resp.Error.Code)) != ""
 	default:
 		return false
 	}
@@ -78,24 +78,24 @@ func reportsFailure(resp *responses.Response) bool {
 func failedResponseError(resp *responses.Response) error {
 	// Clipped, so a value of nothing but spaces contributes nothing rather than
 	// a label or separator with nothing after it.
-	msg := openaicommon.ClipServerText(resp.Error.Message)
+	msg := shared.ClipServerText(resp.Error.Message)
 	var details []string
-	if id := openaicommon.ClipServerText(resp.ID); id != "" {
+	if id := shared.ClipServerText(resp.ID); id != "" {
 		details = append(details, fmt.Sprintf("id %q", id))
 	}
-	if code := openaicommon.ClipServerText(string(resp.Error.Code)); code != "" {
+	if code := shared.ClipServerText(string(resp.Error.Code)); code != "" {
 		details = append(details, fmt.Sprintf("code %q", code))
 	}
 	switch joined := strings.Join(details, ", "); {
 	case joined != "" && msg != "":
-		return fmt.Errorf("%w (%s): %q", openaicommon.ErrResponseFailed, joined, msg)
+		return fmt.Errorf("%w (%s): %q", shared.ErrResponseFailed, joined, msg)
 	case joined != "":
-		return fmt.Errorf("%w (%s)", openaicommon.ErrResponseFailed, joined)
+		return fmt.Errorf("%w (%s)", shared.ErrResponseFailed, joined)
 	case msg != "":
-		return fmt.Errorf("%w: %q", openaicommon.ErrResponseFailed, msg)
+		return fmt.Errorf("%w: %q", shared.ErrResponseFailed, msg)
 	default:
 		// The server said "failed" and nothing more.
-		return openaicommon.ErrResponseFailed
+		return shared.ErrResponseFailed
 	}
 }
 
@@ -123,7 +123,7 @@ func buildCandidate(resp *responses.Response) (*genai.Candidate, error) {
 // for each.
 func convertOutputItems(items []responses.ResponseOutputItemUnion) ([]*genai.Part, error) {
 	if len(items) == 0 {
-		return nil, openaicommon.ErrNoOutputItems
+		return nil, shared.ErrNoOutputItems
 	}
 	var parts []*genai.Part
 	for _, item := range items {
@@ -138,7 +138,7 @@ func convertOutputItems(items []responses.ResponseOutputItemUnion) ([]*genai.Par
 				case "refusal":
 					parts = append(parts, &genai.Part{Text: content.Refusal})
 				default:
-					return nil, fmt.Errorf("%w: %q", openaicommon.ErrUnsupportedMessageContentType, content.Type)
+					return nil, fmt.Errorf("%w: %q", shared.ErrUnsupportedMessageContentType, content.Type)
 				}
 			}
 		case "function_call":
@@ -160,11 +160,11 @@ func convertOutputItems(items []responses.ResponseOutputItemUnion) ([]*genai.Par
 				}
 			}
 		default:
-			return nil, fmt.Errorf("%w: %q", openaicommon.ErrUnsupportedOutputItemType, item.Type)
+			return nil, fmt.Errorf("%w: %q", shared.ErrUnsupportedOutputItemType, item.Type)
 		}
 	}
 	if len(parts) == 0 {
-		return nil, openaicommon.ErrNoTextOrToolContent
+		return nil, shared.ErrNoTextOrToolContent
 	}
 	return parts, nil
 }
@@ -202,7 +202,7 @@ func functionCallArgs(arguments responses.ResponseOutputItemUnionArguments) (map
 			// is no original payload for a re-encode to disagree with.
 			b, err := json.Marshal(v)
 			if err != nil {
-				return nil, fmt.Errorf("%w: %w", openaicommon.ErrFunctionCallArgs, err)
+				return nil, fmt.Errorf("%w: %w", shared.ErrFunctionCallArgs, err)
 			}
 			raw = string(b)
 		}
@@ -212,7 +212,7 @@ func functionCallArgs(arguments responses.ResponseOutputItemUnionArguments) (map
 	}
 	args := map[string]any{}
 	if err := json.Unmarshal([]byte(raw), &args); err != nil {
-		return nil, fmt.Errorf("%w: %w", openaicommon.ErrFunctionCallArgs, err)
+		return nil, fmt.Errorf("%w: %w", shared.ErrFunctionCallArgs, err)
 	}
 	if args == nil {
 		// The payload was JSON null: the call takes no arguments.
@@ -305,17 +305,17 @@ func finishMessage(resp *responses.Response, incompleteEvent bool) string {
 
 func convertUsage(usage responses.ResponseUsage) *genai.GenerateContentResponseUsageMetadata {
 	return &genai.GenerateContentResponseUsageMetadata{
-		PromptTokenCount:        openaicommon.SafeInt32(usage.InputTokens),
-		CandidatesTokenCount:    openaicommon.SafeInt32(usage.OutputTokens),
-		TotalTokenCount:         openaicommon.SafeInt32(usage.TotalTokens),
-		CachedContentTokenCount: openaicommon.SafeInt32(usage.InputTokensDetails.CachedTokens),
+		PromptTokenCount:        shared.SafeInt32(usage.InputTokens),
+		CandidatesTokenCount:    shared.SafeInt32(usage.OutputTokens),
+		TotalTokenCount:         shared.SafeInt32(usage.TotalTokens),
+		CachedContentTokenCount: shared.SafeInt32(usage.InputTokensDetails.CachedTokens),
 		PromptTokensDetails: []*genai.ModalityTokenCount{
-			{Modality: genai.MediaModalityText, TokenCount: openaicommon.SafeInt32(usage.InputTokens)},
+			{Modality: genai.MediaModalityText, TokenCount: shared.SafeInt32(usage.InputTokens)},
 		},
 		CandidatesTokensDetails: []*genai.ModalityTokenCount{
-			{Modality: genai.MediaModalityText, TokenCount: openaicommon.SafeInt32(usage.OutputTokens)},
+			{Modality: genai.MediaModalityText, TokenCount: shared.SafeInt32(usage.OutputTokens)},
 		},
-		ThoughtsTokenCount: openaicommon.SafeInt32(usage.OutputTokensDetails.ReasoningTokens),
+		ThoughtsTokenCount: shared.SafeInt32(usage.OutputTokensDetails.ReasoningTokens),
 	}
 }
 

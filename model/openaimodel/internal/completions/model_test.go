@@ -31,7 +31,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/model"
-	"google.golang.org/adk/v2/model/openaimodel/internal/openaicommon"
+	"google.golang.org/adk/v2/model/openaimodel/internal/shared"
 )
 
 // chatRig serves one canned body and records the path and body it was asked
@@ -104,8 +104,8 @@ func askChat(t *testing.T, llm model.LLM, stream bool) ([]*model.LLMResponse, er
 func TestModel_GenerateContent_NilRequest(t *testing.T) {
 	rig := newChatRig(t, chatJSON(`{}`))
 	for _, err := range rig.model(t).GenerateContent(t.Context(), nil, false) {
-		if !errors.Is(err, openaicommon.ErrRequestNil) {
-			t.Fatalf("err = %v, want %v", err, openaicommon.ErrRequestNil)
+		if !errors.Is(err, shared.ErrRequestNil) {
+			t.Fatalf("err = %v, want %v", err, shared.ErrRequestNil)
 		}
 		return
 	}
@@ -232,8 +232,8 @@ func TestModel_GenerateStream_RefusalDeltas(t *testing.T) {
 func TestModel_GenerateStream_EmptyStream(t *testing.T) {
 	rig := newChatRig(t, chatSSE())
 	_, err := askChat(t, rig.model(t), true)
-	if !errors.Is(err, openaicommon.ErrNoChoices) {
-		t.Fatalf("err = %v, want %v", err, openaicommon.ErrNoChoices)
+	if !errors.Is(err, shared.ErrNoChoices) {
+		t.Fatalf("err = %v, want %v", err, shared.ErrNoChoices)
 	}
 }
 
@@ -307,8 +307,8 @@ func TestModel_GenerateStream_UnparseableCallFailsAsBlocking(t *testing.T) {
 		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
 	))
 	_, err := askChat(t, rig.model(t), true)
-	if !errors.Is(err, openaicommon.ErrFunctionCallArgs) {
-		t.Fatalf("err = %v, want %v", err, openaicommon.ErrFunctionCallArgs)
+	if !errors.Is(err, shared.ErrFunctionCallArgs) {
+		t.Fatalf("err = %v, want %v", err, shared.ErrFunctionCallArgs)
 	}
 }
 

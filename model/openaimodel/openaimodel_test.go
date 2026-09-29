@@ -29,8 +29,8 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/model"
-	"google.golang.org/adk/v2/model/openaimodel/internal/openaicommon"
 	"google.golang.org/adk/v2/model/openaimodel/internal/responses"
+	"google.golang.org/adk/v2/model/openaimodel/internal/shared"
 )
 
 // TestNewModel_SelectsAPI is the facade's whole job: turn the config field into
@@ -96,28 +96,28 @@ func TestNewModel_RequiresModelName(t *testing.T) {
 // to be the internal one rather than a lookalike with the same message.
 func TestSentinelsAliasTheInternalOnes(t *testing.T) {
 	for name, pair := range map[string][2]error{
-		"ErrModelNameRequired":              {ErrModelNameRequired, openaicommon.ErrModelNameRequired},
-		"ErrUnsupportedAPI":                 {ErrUnsupportedAPI, openaicommon.ErrUnsupportedAPI},
-		"ErrNoChoices":                      {ErrNoChoices, openaicommon.ErrNoChoices},
-		"ErrRequestNil":                     {ErrRequestNil, openaicommon.ErrRequestNil},
-		"ErrNoContents":                     {ErrNoContents, openaicommon.ErrNoContents},
-		"ErrFunctionCallMissingName":        {ErrFunctionCallMissingName, openaicommon.ErrFunctionCallMissingName},
-		"ErrTopKNotSupported":               {ErrTopKNotSupported, openaicommon.ErrTopKNotSupported},
-		"ErrStopSequencesNotSupported":      {ErrStopSequencesNotSupported, openaicommon.ErrStopSequencesNotSupported},
-		"ErrMultipleCandidatesNotSupported": {ErrMultipleCandidatesNotSupported, openaicommon.ErrMultipleCandidatesNotSupported},
-		"ErrPenaltiesNotSupported":          {ErrPenaltiesNotSupported, openaicommon.ErrPenaltiesNotSupported},
-		"ErrLabelsNotSupported":             {ErrLabelsNotSupported, openaicommon.ErrLabelsNotSupported},
-		"ErrSafetySettingsNotSupported":     {ErrSafetySettingsNotSupported, openaicommon.ErrSafetySettingsNotSupported},
-		"ErrUnsupportedMIMEType":            {ErrUnsupportedMIMEType, openaicommon.ErrUnsupportedMIMEType},
-		"ErrUnsupportedConfigField":         {ErrUnsupportedConfigField, openaicommon.ErrUnsupportedConfigField},
-		"ErrEmptyJSONSchema":                {ErrEmptyJSONSchema, openaicommon.ErrEmptyJSONSchema},
-		"ErrEmptyResponse":                  {ErrEmptyResponse, openaicommon.ErrEmptyResponse},
-		"ErrNoOutputItems":                  {ErrNoOutputItems, openaicommon.ErrNoOutputItems},
-		"ErrUnsupportedMessageContentType":  {ErrUnsupportedMessageContentType, openaicommon.ErrUnsupportedMessageContentType},
-		"ErrUnsupportedOutputItemType":      {ErrUnsupportedOutputItemType, openaicommon.ErrUnsupportedOutputItemType},
-		"ErrFunctionCallArgs":               {ErrFunctionCallArgs, openaicommon.ErrFunctionCallArgs},
-		"ErrNoTextOrToolContent":            {ErrNoTextOrToolContent, openaicommon.ErrNoTextOrToolContent},
-		"ErrResponseFailed":                 {ErrResponseFailed, openaicommon.ErrResponseFailed},
+		"ErrModelNameRequired":              {ErrModelNameRequired, shared.ErrModelNameRequired},
+		"ErrUnsupportedAPI":                 {ErrUnsupportedAPI, shared.ErrUnsupportedAPI},
+		"ErrNoChoices":                      {ErrNoChoices, shared.ErrNoChoices},
+		"ErrRequestNil":                     {ErrRequestNil, shared.ErrRequestNil},
+		"ErrNoContents":                     {ErrNoContents, shared.ErrNoContents},
+		"ErrFunctionCallMissingName":        {ErrFunctionCallMissingName, shared.ErrFunctionCallMissingName},
+		"ErrTopKNotSupported":               {ErrTopKNotSupported, shared.ErrTopKNotSupported},
+		"ErrStopSequencesNotSupported":      {ErrStopSequencesNotSupported, shared.ErrStopSequencesNotSupported},
+		"ErrMultipleCandidatesNotSupported": {ErrMultipleCandidatesNotSupported, shared.ErrMultipleCandidatesNotSupported},
+		"ErrPenaltiesNotSupported":          {ErrPenaltiesNotSupported, shared.ErrPenaltiesNotSupported},
+		"ErrLabelsNotSupported":             {ErrLabelsNotSupported, shared.ErrLabelsNotSupported},
+		"ErrSafetySettingsNotSupported":     {ErrSafetySettingsNotSupported, shared.ErrSafetySettingsNotSupported},
+		"ErrUnsupportedMIMEType":            {ErrUnsupportedMIMEType, shared.ErrUnsupportedMIMEType},
+		"ErrUnsupportedConfigField":         {ErrUnsupportedConfigField, shared.ErrUnsupportedConfigField},
+		"ErrEmptyJSONSchema":                {ErrEmptyJSONSchema, shared.ErrEmptyJSONSchema},
+		"ErrEmptyResponse":                  {ErrEmptyResponse, shared.ErrEmptyResponse},
+		"ErrNoOutputItems":                  {ErrNoOutputItems, shared.ErrNoOutputItems},
+		"ErrUnsupportedMessageContentType":  {ErrUnsupportedMessageContentType, shared.ErrUnsupportedMessageContentType},
+		"ErrUnsupportedOutputItemType":      {ErrUnsupportedOutputItemType, shared.ErrUnsupportedOutputItemType},
+		"ErrFunctionCallArgs":               {ErrFunctionCallArgs, shared.ErrFunctionCallArgs},
+		"ErrNoTextOrToolContent":            {ErrNoTextOrToolContent, shared.ErrNoTextOrToolContent},
+		"ErrResponseFailed":                 {ErrResponseFailed, shared.ErrResponseFailed},
 	} {
 		if pair[0] != pair[1] {
 			t.Errorf("%s is not the sentinel the endpoint packages return", name)

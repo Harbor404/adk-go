@@ -20,7 +20,7 @@ import (
 	"github.com/openai/openai-go/v3"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/v2/model/openaimodel/internal/openaicommon"
+	"google.golang.org/adk/v2/model/openaimodel/internal/shared"
 )
 
 // errToolCallChunkRejected reports a streamed tool-call delta the accumulator
@@ -83,10 +83,10 @@ func (t *streamTranslator) process(chunk openai.ChatCompletionChunk) (*genai.Gen
 	delta := chunk.Choices[0].Delta
 	switch {
 	case delta.Content != "":
-		return openaicommon.SinglePartResponse(&genai.Part{Text: delta.Content}), nil
+		return shared.SinglePartResponse(&genai.Part{Text: delta.Content}), nil
 	case delta.Refusal != "":
 		// Blocking reports a refusal as text, so streaming does the same.
-		return openaicommon.SinglePartResponse(&genai.Part{Text: delta.Refusal}), nil
+		return shared.SinglePartResponse(&genai.Part{Text: delta.Refusal}), nil
 	}
 	return nil, nil
 }

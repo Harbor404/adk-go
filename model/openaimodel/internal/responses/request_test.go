@@ -32,13 +32,13 @@ import (
 	"github.com/openai/openai-go/v3/option"
 	"github.com/openai/openai-go/v3/packages/param"
 	"github.com/openai/openai-go/v3/responses"
-	"github.com/openai/openai-go/v3/shared"
+	oaishared "github.com/openai/openai-go/v3/shared"
 	"github.com/openai/openai-go/v3/shared/constant"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/model"
 
-	"google.golang.org/adk/v2/model/openaimodel/internal/openaicommon"
+	"google.golang.org/adk/v2/model/openaimodel/internal/shared"
 )
 
 func TestBuildParams_Text(t *testing.T) {
@@ -378,7 +378,7 @@ func TestBuildParams_ToolsPinStrictOff(t *testing.T) {
 func TestBuildParams_UnsupportedPart(t *testing.T) {
 	// The leading turn is what makes this test bite: on its own the
 	// unsupported part leaves the request empty, so a build that skipped it
-	// silently would still fail with openaicommon.ErrNoContents and look like a rejection.
+	// silently would still fail with shared.ErrNoContents and look like a rejection.
 	req := &model.LLMRequest{
 		Contents: []*genai.Content{
 			genai.NewContentFromText("q", genai.RoleUser),
@@ -394,7 +394,7 @@ func TestBuildParams_UnsupportedPart(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error for inline data part")
 	}
-	if errors.Is(err, openaicommon.ErrNoContents) || !strings.Contains(err.Error(), "unsupported content part") {
+	if errors.Is(err, shared.ErrNoContents) || !strings.Contains(err.Error(), "unsupported content part") {
 		t.Errorf("buildParams() err = %v, want an unsupported-content-part error", err)
 	}
 }
@@ -517,7 +517,7 @@ func TestBuildParams_DropsReplayedThoughts(t *testing.T) {
 		},
 		{
 			// Dropping a thought-marked call would strand its response and
-			// fail the request in openaicommon.CallTracker.
+			// fail the request in shared.CallTracker.
 			name: "thought_marked_call_and_response_survive",
 			contents: []*genai.Content{
 				modelTurn(&genai.Part{
@@ -736,14 +736,14 @@ func TestBuildParams_DropsReplayedThoughts(t *testing.T) {
 					FunctionCall: &genai.FunctionCall{},
 				}),
 			},
-			wantErr: openaicommon.ErrFunctionCallMissingName,
+			wantErr: shared.ErrFunctionCallMissingName,
 		},
 		{
 			// A request left empty by the drop is reported rather than sent,
 			// and says the drop emptied it rather than that nothing was sent.
 			name:        "only_thoughts",
 			contents:    []*genai.Content{modelTurn(thought("scratch"))},
-			wantErr:     openaicommon.ErrNoContents,
+			wantErr:     shared.ErrNoContents,
 			wantErrText: "every part was dropped as replayed reasoning",
 		},
 		{
@@ -752,7 +752,7 @@ func TestBuildParams_DropsReplayedThoughts(t *testing.T) {
 			// still reports the drop.
 			name:        "thought_and_blank_answer",
 			contents:    []*genai.Content{modelTurn(thought("scratch"), &genai.Part{Text: "   "})},
-			wantErr:     openaicommon.ErrNoContents,
+			wantErr:     shared.ErrNoContents,
 			wantErrText: "every part was dropped as replayed reasoning",
 		},
 	}
@@ -783,7 +783,7 @@ func TestBuildParams_DropsReplayedThoughts(t *testing.T) {
 }
 
 // TestBuildParams_NoContentsSentinelIdentity pins which requests get the
-// bare openaicommon.ErrNoContents and which get it wrapped, because a caller comparing with
+// bare shared.ErrNoContents and which get it wrapped, because a caller comparing with
 // == rather than errors.Is sees only the bare one. Only a drop that suppressed
 // text the model would otherwise have seen earns the wrap.
 func TestBuildParams_NoContentsSentinelIdentity(t *testing.T) {
@@ -870,12 +870,12 @@ func TestBuildParams_NoContentsSentinelIdentity(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := buildParams("fallback", &model.LLMRequest{Contents: tt.contents})
-			if !errors.Is(err, openaicommon.ErrNoContents) {
-				t.Fatalf("buildParams() err = %v, want it to wrap %v", err, openaicommon.ErrNoContents)
+			if !errors.Is(err, shared.ErrNoContents) {
+				t.Fatalf("buildParams() err = %v, want it to wrap %v", err, shared.ErrNoContents)
 			}
 			//nolint:errorlint // the point of the test is the identity, not the chain.
-			if gotBare := err == openaicommon.ErrNoContents; gotBare != tt.wantBare {
-				t.Errorf("err == openaicommon.ErrNoContents is %v, want %v (err = %q)", gotBare, tt.wantBare, err)
+			if gotBare := err == shared.ErrNoContents; gotBare != tt.wantBare {
+				t.Errorf("err == shared.ErrNoContents is %v, want %v (err = %q)", gotBare, tt.wantBare, err)
 			}
 		})
 	}
@@ -968,14 +968,14 @@ func TestReplayedReasoning(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := openaicommon.ReplayedReasoning(tt.part); got != tt.want {
+			if got := shared.ReplayedReasoning(tt.part); got != tt.want {
 				t.Errorf("ReplayedReasoning() = %v, want %v", got, tt.want)
 			}
 		})
 	}
 }
 
-// accountedForFields is the specification openaicommon.UnsupportedPayload
+// accountedForFields is the specification shared.UnsupportedPayload
 // implements: the genai.Part fields the request converters know what to do with,
 // and why.
 //
@@ -1006,7 +1006,7 @@ func TestUnsupportedPayload_WalksEveryPartField(t *testing.T) {
 			part := &genai.Part{}
 			reflect.ValueOf(part).Elem().Field(i).Set(nonZero(t, field.Type))
 
-			got := openaicommon.UnsupportedPayload(part)
+			got := shared.UnsupportedPayload(part)
 			if why, accounted := accountedForFields[field.Name]; accounted {
 				if got != "" {
 					t.Errorf("UnsupportedPayload() = %q for a part carrying only %s, want %q: %s",
@@ -1082,7 +1082,7 @@ func TestReplayedReasoning_EveryUnaccountedFieldDisqualifies(t *testing.T) {
 		t.Run(field.Name, func(t *testing.T) {
 			part := &genai.Part{Thought: true, Text: "scratch"}
 			reflect.ValueOf(part).Elem().Field(i).Set(nonZero(t, field.Type))
-			if openaicommon.ReplayedReasoning(part) {
+			if shared.ReplayedReasoning(part) {
 				t.Errorf("ReplayedReasoning() = true for a thought carrying %s; "+
 					"it would be dropped instead of rejected as unsupported", field.Name)
 			}
@@ -1115,7 +1115,7 @@ func nonZero(t *testing.T, typ reflect.Type) reflect.Value {
 }
 
 func TestCallTrackerNewFunctionResponse_UnknownCallID(t *testing.T) {
-	tracker := openaicommon.CallTracker{Pending: []string{"call-1"}}
+	tracker := shared.CallTracker{Pending: []string{"call-1"}}
 	fr := &genai.FunctionResponse{
 		Name:     "lookup",
 		ID:       "call-missing",
@@ -1149,37 +1149,37 @@ func TestApplyGenerationConfig(t *testing.T) {
 		{
 			name:    "TopK not supported",
 			cfg:     &genai.GenerateContentConfig{TopK: &topK},
-			wantErr: openaicommon.ErrTopKNotSupported,
+			wantErr: shared.ErrTopKNotSupported,
 		},
 		{
 			name:    "StopSequences not supported",
 			cfg:     &genai.GenerateContentConfig{StopSequences: []string{"stop"}},
-			wantErr: openaicommon.ErrStopSequencesNotSupported,
+			wantErr: shared.ErrStopSequencesNotSupported,
 		},
 		{
 			name:    "Multiple candidates not supported",
 			cfg:     &genai.GenerateContentConfig{CandidateCount: 2},
-			wantErr: openaicommon.ErrMultipleCandidatesNotSupported,
+			wantErr: shared.ErrMultipleCandidatesNotSupported,
 		},
 		{
 			name:    "Penalties not supported",
 			cfg:     &genai.GenerateContentConfig{FrequencyPenalty: &p},
-			wantErr: openaicommon.ErrPenaltiesNotSupported,
+			wantErr: shared.ErrPenaltiesNotSupported,
 		},
 		{
 			name:    "Labels not supported",
 			cfg:     &genai.GenerateContentConfig{Labels: map[string]string{"a": "b"}},
-			wantErr: openaicommon.ErrLabelsNotSupported,
+			wantErr: shared.ErrLabelsNotSupported,
 		},
 		{
 			name:    "Safety settings not supported",
 			cfg:     &genai.GenerateContentConfig{SafetySettings: []*genai.SafetySetting{{}}},
-			wantErr: openaicommon.ErrSafetySettingsNotSupported,
+			wantErr: shared.ErrSafetySettingsNotSupported,
 		},
 		{
 			name:    "Unsupported MIME type",
 			cfg:     &genai.GenerateContentConfig{ResponseMIMEType: "image/png"},
-			wantErr: openaicommon.ErrUnsupportedMIMEType,
+			wantErr: shared.ErrUnsupportedMIMEType,
 		},
 		{
 			name: "success fully configured",
@@ -1225,7 +1225,7 @@ func TestApplyGenerationConfig(t *testing.T) {
 			wantParams: &responses.ResponseNewParams{
 				Text: responses.ResponseTextConfigParam{
 					Format: responses.ResponseFormatTextConfigUnionParam{
-						OfJSONObject: &shared.ResponseFormatJSONObjectParam{
+						OfJSONObject: &oaishared.ResponseFormatJSONObjectParam{
 							Type: constant.JSONObject("json_object"),
 						},
 					},
@@ -1282,8 +1282,8 @@ func TestApplyGenerationConfigRejectsUnsupportedFields(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.field, func(t *testing.T) {
 			err := applyGenerationConfig(&responses.ResponseNewParams{}, tc.cfg)
-			if !errors.Is(err, openaicommon.ErrUnsupportedConfigField) {
-				t.Fatalf("applyGenerationConfig() error = %v, want %v", err, openaicommon.ErrUnsupportedConfigField)
+			if !errors.Is(err, shared.ErrUnsupportedConfigField) {
+				t.Fatalf("applyGenerationConfig() error = %v, want %v", err, shared.ErrUnsupportedConfigField)
 			}
 			if !strings.Contains(err.Error(), tc.field) {
 				t.Errorf("applyGenerationConfig() error = %q, want it to name %q", err, tc.field)
@@ -1300,42 +1300,42 @@ func TestApplyGenerationConfigThinkingConfig(t *testing.T) {
 	tests := []struct {
 		name     string
 		thinking *genai.ThinkingConfig
-		want     shared.ReasoningParam
+		want     oaishared.ReasoningParam
 	}{
-		{"minimal level", &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelMinimal}, shared.ReasoningParam{Effort: shared.ReasoningEffortMinimal}},
-		{"low level", &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelLow}, shared.ReasoningParam{Effort: shared.ReasoningEffortLow}},
-		{"medium level", &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelMedium}, shared.ReasoningParam{Effort: shared.ReasoningEffortMedium}},
-		{"high level", &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelHigh}, shared.ReasoningParam{Effort: shared.ReasoningEffortHigh}},
+		{"minimal level", &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelMinimal}, oaishared.ReasoningParam{Effort: oaishared.ReasoningEffortMinimal}},
+		{"low level", &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelLow}, oaishared.ReasoningParam{Effort: oaishared.ReasoningEffortLow}},
+		{"medium level", &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelMedium}, oaishared.ReasoningParam{Effort: oaishared.ReasoningEffortMedium}},
+		{"high level", &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelHigh}, oaishared.ReasoningParam{Effort: oaishared.ReasoningEffortHigh}},
 		// Explicitly unspecified is distinct from unset, and resolves to medium.
-		{"unspecified level", &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelUnspecified}, shared.ReasoningParam{Effort: shared.ReasoningEffortMedium}},
+		{"unspecified level", &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelUnspecified}, oaishared.ReasoningParam{Effort: oaishared.ReasoningEffortMedium}},
 		// Responses has no token budget, so only zero/non-zero survives. Zero is
 		// none rather than minimal: minimal is the least thinking, not none of it.
-		{"zero budget", &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(0))}, shared.ReasoningParam{Effort: shared.ReasoningEffortNone}},
-		{"positive budget", &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(2048))}, shared.ReasoningParam{Effort: shared.ReasoningEffortMedium}},
+		{"zero budget", &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(0))}, oaishared.ReasoningParam{Effort: oaishared.ReasoningEffortNone}},
+		{"positive budget", &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(2048))}, oaishared.ReasoningParam{Effort: oaishared.ReasoningEffortMedium}},
 		// -1 is genai's "you decide", and the way to say that to Responses is to
 		// send no effort at all rather than to pick one on the caller's behalf.
-		{"dynamic budget", &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(openaicommon.DynamicThinkingBudget))}, shared.ReasoningParam{}},
+		{"dynamic budget", &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(shared.DynamicThinkingBudget))}, oaishared.ReasoningParam{}},
 		{"dynamic budget with thoughts", &genai.ThinkingConfig{
-			ThinkingBudget:  genai.Ptr(int32(openaicommon.DynamicThinkingBudget)),
+			ThinkingBudget:  genai.Ptr(int32(shared.DynamicThinkingBudget)),
 			IncludeThoughts: true,
-		}, shared.ReasoningParam{Summary: shared.ReasoningSummaryAuto}},
+		}, oaishared.ReasoningParam{Summary: oaishared.ReasoningSummaryAuto}},
 		// A level wins over a budget, so an explicit MINIMAL still means minimal
 		// even alongside the zero budget that would otherwise mean none.
 		{"level wins over budget", &genai.ThinkingConfig{
 			ThinkingLevel:  genai.ThinkingLevelMinimal,
 			ThinkingBudget: genai.Ptr(int32(0)),
-		}, shared.ReasoningParam{Effort: shared.ReasoningEffortMinimal}},
+		}, oaishared.ReasoningParam{Effort: oaishared.ReasoningEffortMinimal}},
 		// IncludeThoughts is what asks for summaries, and only it.
 		{"thoughts with level", &genai.ThinkingConfig{
 			ThinkingLevel:   genai.ThinkingLevelHigh,
 			IncludeThoughts: true,
-		}, shared.ReasoningParam{Effort: shared.ReasoningEffortHigh, Summary: shared.ReasoningSummaryAuto}},
+		}, oaishared.ReasoningParam{Effort: oaishared.ReasoningEffortHigh, Summary: oaishared.ReasoningSummaryAuto}},
 		{"thoughts with budget", &genai.ThinkingConfig{
 			ThinkingBudget:  genai.Ptr(int32(2048)),
 			IncludeThoughts: true,
-		}, shared.ReasoningParam{Effort: shared.ReasoningEffortMedium, Summary: shared.ReasoningSummaryAuto}},
+		}, oaishared.ReasoningParam{Effort: oaishared.ReasoningEffortMedium, Summary: oaishared.ReasoningSummaryAuto}},
 		// Thoughts alone leave the effort to the model rather than inventing one.
-		{"thoughts alone", &genai.ThinkingConfig{IncludeThoughts: true}, shared.ReasoningParam{Summary: shared.ReasoningSummaryAuto}},
+		{"thoughts alone", &genai.ThinkingConfig{IncludeThoughts: true}, oaishared.ReasoningParam{Summary: oaishared.ReasoningSummaryAuto}},
 	}
 
 	for _, tc := range tests {
@@ -1362,7 +1362,7 @@ func TestApplyGenerationConfigOmitsReasoningSummaryUnlessAsked(t *testing.T) {
 		{"high level", &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelHigh}},
 		{"zero budget", &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(0))}},
 		{"positive budget", &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(4096))}},
-		{"dynamic budget", &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(openaicommon.DynamicThinkingBudget))}},
+		{"dynamic budget", &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(shared.DynamicThinkingBudget))}},
 		{"level with thoughts off", &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelLow, IncludeThoughts: false}},
 	}
 
@@ -1404,8 +1404,8 @@ func TestApplyGenerationConfigRejectsNegativeThinkingBudget(t *testing.T) {
 			err := applyGenerationConfig(&responses.ResponseNewParams{}, &genai.GenerateContentConfig{
 				ThinkingConfig: tc.thinking,
 			})
-			if !errors.Is(err, openaicommon.ErrUnsupportedConfigField) {
-				t.Fatalf("applyGenerationConfig() error = %v, want %v", err, openaicommon.ErrUnsupportedConfigField)
+			if !errors.Is(err, shared.ErrUnsupportedConfigField) {
+				t.Fatalf("applyGenerationConfig() error = %v, want %v", err, shared.ErrUnsupportedConfigField)
 			}
 			if !strings.Contains(err.Error(), "ThinkingBudget") {
 				t.Errorf("applyGenerationConfig() error = %q, want it to name ThinkingBudget", err)
@@ -1421,24 +1421,24 @@ func TestApplyGenerationConfigUnspecifiedLevelYieldsToABudget(t *testing.T) {
 	tests := []struct {
 		name     string
 		thinking *genai.ThinkingConfig
-		want     shared.ReasoningParam
+		want     oaishared.ReasoningParam
 	}{
 		{"unspecified alone", &genai.ThinkingConfig{
 			ThinkingLevel: genai.ThinkingLevelUnspecified,
-		}, shared.ReasoningParam{Effort: shared.ReasoningEffortMedium}},
+		}, oaishared.ReasoningParam{Effort: oaishared.ReasoningEffortMedium}},
 		{"unspecified yields to zero budget", &genai.ThinkingConfig{
 			ThinkingLevel:  genai.ThinkingLevelUnspecified,
 			ThinkingBudget: genai.Ptr(int32(0)),
-		}, shared.ReasoningParam{Effort: shared.ReasoningEffortNone}},
+		}, oaishared.ReasoningParam{Effort: oaishared.ReasoningEffortNone}},
 		{"unspecified yields to dynamic budget", &genai.ThinkingConfig{
 			ThinkingLevel:  genai.ThinkingLevelUnspecified,
-			ThinkingBudget: genai.Ptr(int32(openaicommon.DynamicThinkingBudget)),
-		}, shared.ReasoningParam{}},
+			ThinkingBudget: genai.Ptr(int32(shared.DynamicThinkingBudget)),
+		}, oaishared.ReasoningParam{}},
 		// A named level is a choice, so it keeps winning.
 		{"named level still wins over zero budget", &genai.ThinkingConfig{
 			ThinkingLevel:  genai.ThinkingLevelHigh,
 			ThinkingBudget: genai.Ptr(int32(0)),
-		}, shared.ReasoningParam{Effort: shared.ReasoningEffortHigh}},
+		}, oaishared.ReasoningParam{Effort: oaishared.ReasoningEffortHigh}},
 	}
 
 	for _, tc := range tests {
@@ -1460,8 +1460,8 @@ func TestApplyGenerationConfigRejectsUnknownThinkingLevel(t *testing.T) {
 	err := applyGenerationConfig(&responses.ResponseNewParams{}, &genai.GenerateContentConfig{
 		ThinkingConfig: &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevel("EXHAUSTIVE")},
 	})
-	if !errors.Is(err, openaicommon.ErrUnsupportedConfigField) {
-		t.Fatalf("applyGenerationConfig() error = %v, want %v", err, openaicommon.ErrUnsupportedConfigField)
+	if !errors.Is(err, shared.ErrUnsupportedConfigField) {
+		t.Fatalf("applyGenerationConfig() error = %v, want %v", err, shared.ErrUnsupportedConfigField)
 	}
 	if !strings.Contains(err.Error(), "EXHAUSTIVE") {
 		t.Errorf("applyGenerationConfig() error = %q, want it to name the level", err)
@@ -1483,12 +1483,12 @@ func TestReasoningEffortsCoverEveryThinkingLevel(t *testing.T) {
 		genai.ThinkingLevelHigh,
 	}
 	for _, level := range levels {
-		if _, ok := openaicommon.ReasoningEfforts[level]; !ok {
-			t.Errorf("openaicommon.ReasoningEfforts is missing genai.ThinkingLevel %q", level)
+		if _, ok := shared.ReasoningEfforts[level]; !ok {
+			t.Errorf("shared.ReasoningEfforts is missing genai.ThinkingLevel %q", level)
 		}
 	}
-	if len(openaicommon.ReasoningEfforts) != len(levels) {
-		t.Errorf("openaicommon.ReasoningEfforts has %d entries, want %d: it gained one this test does not list", len(openaicommon.ReasoningEfforts), len(levels))
+	if len(shared.ReasoningEfforts) != len(levels) {
+		t.Errorf("shared.ReasoningEfforts has %d entries, want %d: it gained one this test does not list", len(shared.ReasoningEfforts), len(levels))
 	}
 
 	// And the mapping is reachable end to end, not just present in the map: a
@@ -1500,8 +1500,8 @@ func TestReasoningEffortsCoverEveryThinkingLevel(t *testing.T) {
 			t.Errorf("applyGenerationConfig(ThinkingLevel %q) error = %v, want nil", level, err)
 			continue
 		}
-		if params.Reasoning.Effort != openaicommon.ReasoningEfforts[level] {
-			t.Errorf("ThinkingLevel %q produced effort %q, want %q", level, params.Reasoning.Effort, openaicommon.ReasoningEfforts[level])
+		if params.Reasoning.Effort != shared.ReasoningEfforts[level] {
+			t.Errorf("ThinkingLevel %q produced effort %q, want %q", level, params.Reasoning.Effort, shared.ReasoningEfforts[level])
 		}
 	}
 }
@@ -1525,7 +1525,7 @@ func TestApplyGenerationConfigAcceptsEmptyThinkingConfig(t *testing.T) {
 			if err := applyGenerationConfig(params, &genai.GenerateContentConfig{ThinkingConfig: tc.thinking}); err != nil {
 				t.Fatalf("applyGenerationConfig() error = %v, want nil", err)
 			}
-			if !reflect.DeepEqual(params.Reasoning, shared.ReasoningParam{}) {
+			if !reflect.DeepEqual(params.Reasoning, oaishared.ReasoningParam{}) {
 				t.Errorf("params.Reasoning = %+v, want zero: nothing was asked for", params.Reasoning)
 			}
 		})
@@ -1539,7 +1539,7 @@ func TestApplyGenerationConfigOmitsReasoningByDefault(t *testing.T) {
 	if err := applyGenerationConfig(params, &genai.GenerateContentConfig{}); err != nil {
 		t.Fatalf("applyGenerationConfig() error = %v, want nil", err)
 	}
-	if !reflect.DeepEqual(params.Reasoning, shared.ReasoningParam{}) {
+	if !reflect.DeepEqual(params.Reasoning, oaishared.ReasoningParam{}) {
 		t.Errorf("params.Reasoning = %+v, want zero", params.Reasoning)
 	}
 }
@@ -1562,8 +1562,8 @@ func TestApplyGenerationConfigRejectsUntranslatableValues(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			err := applyGenerationConfig(&responses.ResponseNewParams{}, tc.cfg)
-			if !errors.Is(err, openaicommon.ErrUnsupportedConfigField) {
-				t.Fatalf("applyGenerationConfig() error = %v, want %v", err, openaicommon.ErrUnsupportedConfigField)
+			if !errors.Is(err, shared.ErrUnsupportedConfigField) {
+				t.Fatalf("applyGenerationConfig() error = %v, want %v", err, shared.ErrUnsupportedConfigField)
 			}
 			if !strings.Contains(err.Error(), tc.names) {
 				t.Errorf("applyGenerationConfig() error = %q, want it to name %q", err, tc.names)
@@ -1605,8 +1605,8 @@ func TestApplyGenerationConfigRejectsExplicitOff(t *testing.T) {
 	err := applyGenerationConfig(&responses.ResponseNewParams{}, &genai.GenerateContentConfig{
 		EnableEnhancedCivicAnswers: genai.Ptr(false),
 	})
-	if !errors.Is(err, openaicommon.ErrUnsupportedConfigField) {
-		t.Fatalf("applyGenerationConfig() error = %v, want %v", err, openaicommon.ErrUnsupportedConfigField)
+	if !errors.Is(err, shared.ErrUnsupportedConfigField) {
+		t.Fatalf("applyGenerationConfig() error = %v, want %v", err, shared.ErrUnsupportedConfigField)
 	}
 	if !strings.Contains(err.Error(), "EnableEnhancedCivicAnswers") {
 		t.Errorf("applyGenerationConfig() error = %q, want it to name EnableEnhancedCivicAnswers", err)
@@ -1648,8 +1648,8 @@ func TestApplyGenerationConfigServiceTier(t *testing.T) {
 	err := applyGenerationConfig(&responses.ResponseNewParams{}, &genai.GenerateContentConfig{
 		ServiceTier: genai.ServiceTier("platinum"),
 	})
-	if !errors.Is(err, openaicommon.ErrUnsupportedConfigField) {
-		t.Fatalf("unknown tier: error = %v, want %v", err, openaicommon.ErrUnsupportedConfigField)
+	if !errors.Is(err, shared.ErrUnsupportedConfigField) {
+		t.Fatalf("unknown tier: error = %v, want %v", err, shared.ErrUnsupportedConfigField)
 	}
 	if !strings.Contains(err.Error(), "platinum") {
 		t.Errorf("unknown tier: error = %q, want it to name the tier", err)
@@ -1684,8 +1684,8 @@ func TestRequestTimeoutHonorsAPositiveTimeout(t *testing.T) {
 	if err := applyGenerationConfig(&responses.ResponseNewParams{}, cfg); err != nil {
 		t.Fatalf("applyGenerationConfig() error = %v, want nil: a timeout is honored", err)
 	}
-	if got := openaicommon.RequestTimeout(cfg); got != timeout {
-		t.Errorf("openaicommon.RequestTimeout() = %v, want %v", got, timeout)
+	if got := shared.RequestTimeout(cfg); got != timeout {
+		t.Errorf("shared.RequestTimeout() = %v, want %v", got, timeout)
 	}
 }
 
@@ -1697,8 +1697,8 @@ func TestApplyGenerationConfigRejectsNonPositiveTimeout(t *testing.T) {
 		err := applyGenerationConfig(&responses.ResponseNewParams{}, &genai.GenerateContentConfig{
 			HTTPOptions: &genai.HTTPOptions{Timeout: &timeout},
 		})
-		if !errors.Is(err, openaicommon.ErrUnsupportedConfigField) {
-			t.Fatalf("timeout %v: error = %v, want %v", d, err, openaicommon.ErrUnsupportedConfigField)
+		if !errors.Is(err, shared.ErrUnsupportedConfigField) {
+			t.Fatalf("timeout %v: error = %v, want %v", d, err, shared.ErrUnsupportedConfigField)
 		}
 		if !strings.Contains(err.Error(), "Timeout") {
 			t.Errorf("timeout %v: error = %q, want it to name Timeout", d, err)
@@ -1723,7 +1723,7 @@ func TestCallerAuthorizationHeaderDisplacesTheAPIKey(t *testing.T) {
 	defer srv.Close()
 
 	client := openai.NewClient(option.WithAPIKey("real-key"), option.WithBaseURL(srv.URL))
-	params := responses.ResponseNewParams{Model: shared.ResponsesModel("m")}
+	params := responses.ResponseNewParams{Model: oaishared.ResponsesModel("m")}
 
 	// Only the header the stub saw matters here, never the decoded response.
 	_, _ = client.Responses.New(context.Background(), params)
@@ -1759,7 +1759,7 @@ func TestHeadersAffectNeitherValidationNorTimeout(t *testing.T) {
 		if err := applyGenerationConfig(&responses.ResponseNewParams{}, cfg); err != nil {
 			t.Fatalf("headers %v: error = %v, want nil: headers are ignored, not refused", names, err)
 		}
-		if got := openaicommon.RequestTimeout(cfg); got != 0 {
+		if got := shared.RequestTimeout(cfg); got != 0 {
 			t.Errorf("headers %v: produced a %v timeout, want none", names, got)
 		}
 	}
@@ -1771,8 +1771,8 @@ func TestApplyGenerationConfigRejectsEmptyResponseModalities(t *testing.T) {
 	err := applyGenerationConfig(&responses.ResponseNewParams{}, &genai.GenerateContentConfig{
 		ResponseModalities: []string{},
 	})
-	if !errors.Is(err, openaicommon.ErrUnsupportedConfigField) {
-		t.Fatalf("applyGenerationConfig() error = %v, want %v", err, openaicommon.ErrUnsupportedConfigField)
+	if !errors.Is(err, shared.ErrUnsupportedConfigField) {
+		t.Fatalf("applyGenerationConfig() error = %v, want %v", err, shared.ErrUnsupportedConfigField)
 	}
 	if !strings.Contains(err.Error(), "ResponseModalities") {
 		t.Errorf("applyGenerationConfig() error = %q, want it to name ResponseModalities", err)
@@ -1780,7 +1780,7 @@ func TestApplyGenerationConfigRejectsEmptyResponseModalities(t *testing.T) {
 }
 
 // Every named error is checked before the sentinel, so an errors.Is call site
-// that worked before openaicommon.ErrUnsupportedConfigField existed still works when the
+// that worked before shared.ErrUnsupportedConfigField existed still works when the
 // caller happens to set one of the newly-rejected fields as well.
 func TestApplyGenerationConfigKeepsNamedErrorPrecedence(t *testing.T) {
 	topK := float32(5)
@@ -1796,26 +1796,26 @@ func TestApplyGenerationConfigKeepsNamedErrorPrecedence(t *testing.T) {
 		{"TopK over Seed", &genai.GenerateContentConfig{
 			TopK: &topK,
 			Seed: genai.Ptr(int32(7)),
-		}, openaicommon.ErrTopKNotSupported},
+		}, shared.ErrTopKNotSupported},
 		{"Labels over orphan Logprobs", &genai.GenerateContentConfig{
 			Logprobs: genai.Ptr(int32(5)),
 			Labels:   map[string]string{"team": "search"},
-		}, openaicommon.ErrLabelsNotSupported},
+		}, shared.ErrLabelsNotSupported},
 		{"SafetySettings over orphan Logprobs", &genai.GenerateContentConfig{
 			Logprobs:       genai.Ptr(int32(5)),
 			SafetySettings: []*genai.SafetySetting{{Category: genai.HarmCategoryHarassment}},
-		}, openaicommon.ErrSafetySettingsNotSupported},
+		}, shared.ErrSafetySettingsNotSupported},
 		{"MIME type over orphan Logprobs", &genai.GenerateContentConfig{
 			Logprobs:         genai.Ptr(int32(5)),
 			ResponseMIMEType: "text/csv",
-		}, openaicommon.ErrUnsupportedMIMEType},
+		}, shared.ErrUnsupportedMIMEType},
 		// The budget has to be one applyThinkingConfig actually rejects, or
 		// there is no competing error for the named one to win against and the
 		// case passes whether precedence works or not.
 		{"StopSequences over ThinkingConfig", &genai.GenerateContentConfig{
 			StopSequences:  []string{"STOP"},
 			ThinkingConfig: &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(-2))},
-		}, openaicommon.ErrStopSequencesNotSupported},
+		}, shared.ErrStopSequencesNotSupported},
 	}
 
 	for _, tc := range tests {
@@ -1829,7 +1829,7 @@ func TestApplyGenerationConfigKeepsNamedErrorPrecedence(t *testing.T) {
 }
 
 // Guards against the bug returning as genai grows fields: every exported field
-// must be translated, covered by a named error, or in openaicommon.UnsupportedConfigFields.
+// must be translated, covered by a named error, or in shared.UnsupportedConfigFields.
 // When this fails, add the new field to whichever of the three it belongs in —
 // not to this test alone, which would only re-hide the drop.
 func TestGenerateContentConfigFieldsAreAccountedFor(t *testing.T) {
@@ -1849,7 +1849,7 @@ func TestGenerateContentConfigFieldsAreAccountedFor(t *testing.T) {
 		"Tools":              true,
 		"ToolConfig":         true,
 	}
-	// Fields rejected with their own error, predating openaicommon.ErrUnsupportedConfigField.
+	// Fields rejected with their own error, predating shared.ErrUnsupportedConfigField.
 	namedError := map[string]bool{
 		"TopK":             true,
 		"StopSequences":    true,
@@ -1860,8 +1860,8 @@ func TestGenerateContentConfigFieldsAreAccountedFor(t *testing.T) {
 		"SafetySettings":   true,
 		"ResponseMIMEType": true,
 	}
-	rejected := make(map[string]bool, len(openaicommon.UnsupportedConfigFields))
-	for _, field := range openaicommon.UnsupportedConfigFields {
+	rejected := make(map[string]bool, len(shared.UnsupportedConfigFields))
+	for _, field := range shared.UnsupportedConfigFields {
 		rejected[field.Name] = true
 	}
 
@@ -1879,7 +1879,7 @@ func TestGenerateContentConfigFieldsAreAccountedFor(t *testing.T) {
 	// Reverse drift: a field renamed upstream leaves a stale entry guarding nothing.
 	for name := range rejected {
 		if _, ok := cfgType.FieldByName(name); !ok {
-			t.Errorf("openaicommon.UnsupportedConfigFields lists %q, which genai.GenerateContentConfig no longer has", name)
+			t.Errorf("shared.UnsupportedConfigFields lists %q, which genai.GenerateContentConfig no longer has", name)
 		}
 	}
 }
@@ -2486,7 +2486,7 @@ func TestBuildParamsPreservesLargeJSONSchemaIntegers(t *testing.T) {
 }
 
 // The timeout has to reach the request, not merely be computed: asserting that
-// openaicommon.RequestTimeout returns the right duration says nothing about the
+// shared.RequestTimeout returns the right duration says nothing about the
 // context.WithTimeout wiring in generate and generateStream, which is the only
 // thing HTTPOptions still does.
 //
@@ -2553,17 +2553,17 @@ func TestHTTPOptionsTimeoutReachesTheRequest(t *testing.T) {
 	}
 }
 
-// openaicommon.IgnoredHTTPOptionFields is part of the contract, so it has to name a real
+// shared.IgnoredHTTPOptionFields is part of the contract, so it has to name a real
 // field, and every field has to be accounted for in exactly one of the three
 // categories the package documents.
 func TestHTTPOptionFieldsAreAccountedFor(t *testing.T) {
 	honored := map[string]bool{"Timeout": true}
-	ignored := make(map[string]bool, len(openaicommon.IgnoredHTTPOptionFields))
-	for _, name := range openaicommon.IgnoredHTTPOptionFields {
+	ignored := make(map[string]bool, len(shared.IgnoredHTTPOptionFields))
+	for _, name := range shared.IgnoredHTTPOptionFields {
 		ignored[name] = true
 	}
-	rejected := make(map[string]bool, len(openaicommon.UnsupportedHTTPOptionFields))
-	for _, field := range openaicommon.UnsupportedHTTPOptionFields {
+	rejected := make(map[string]bool, len(shared.UnsupportedHTTPOptionFields))
+	for _, field := range shared.UnsupportedHTTPOptionFields {
 		rejected[field.Name] = true
 	}
 
@@ -2585,12 +2585,12 @@ func TestHTTPOptionFieldsAreAccountedFor(t *testing.T) {
 	}
 	for name := range ignored {
 		if _, ok := optType.FieldByName(name); !ok {
-			t.Errorf("openaicommon.IgnoredHTTPOptionFields lists %q, which genai.HTTPOptions no longer has", name)
+			t.Errorf("shared.IgnoredHTTPOptionFields lists %q, which genai.HTTPOptions no longer has", name)
 		}
 	}
 	for name := range rejected {
 		if _, ok := optType.FieldByName(name); !ok {
-			t.Errorf("openaicommon.UnsupportedHTTPOptionFields lists %q, which genai.HTTPOptions no longer has", name)
+			t.Errorf("shared.UnsupportedHTTPOptionFields lists %q, which genai.HTTPOptions no longer has", name)
 		}
 	}
 }
@@ -2659,7 +2659,7 @@ func assertReRangeable(t *testing.T, stream bool) {
 	}
 }
 
-// geminiShapedHTTPOptions carries one live value per openaicommon.UnsupportedHTTPOptionFields
+// geminiShapedHTTPOptions carries one live value per shared.UnsupportedHTTPOptionFields
 // entry, shared so the pairing test below derives from the cases that actually
 // run rather than from a second list agreeing with neither.
 //
@@ -2685,8 +2685,8 @@ func TestApplyGenerationConfigRejectsGeminiShapedHTTPOptions(t *testing.T) {
 			err := applyGenerationConfig(&responses.ResponseNewParams{}, &genai.GenerateContentConfig{
 				HTTPOptions: tc.opts,
 			})
-			if !errors.Is(err, openaicommon.ErrUnsupportedConfigField) {
-				t.Fatalf("applyGenerationConfig() error = %v, want %v", err, openaicommon.ErrUnsupportedConfigField)
+			if !errors.Is(err, shared.ErrUnsupportedConfigField) {
+				t.Fatalf("applyGenerationConfig() error = %v, want %v", err, shared.ErrUnsupportedConfigField)
 			}
 			if !strings.Contains(err.Error(), tc.field) {
 				t.Errorf("applyGenerationConfig() error = %q, want it to name %q", err, tc.field)
@@ -2703,14 +2703,14 @@ func TestEveryUnsupportedHTTPOptionFieldIsDriven(t *testing.T) {
 	for _, tc := range geminiShapedHTTPOptions {
 		driven[tc.field] = true
 	}
-	for _, field := range openaicommon.UnsupportedHTTPOptionFields {
+	for _, field := range shared.UnsupportedHTTPOptionFields {
 		if !driven[field.Name] {
-			t.Errorf("openaicommon.UnsupportedHTTPOptionFields has %q with no case in "+
+			t.Errorf("shared.UnsupportedHTTPOptionFields has %q with no case in "+
 				"geminiShapedHTTPOptions, so its predicate never runs", field.Name)
 		}
 	}
-	if len(driven) != len(openaicommon.UnsupportedHTTPOptionFields) {
-		t.Errorf("%d cases for %d predicates", len(driven), len(openaicommon.UnsupportedHTTPOptionFields))
+	if len(driven) != len(shared.UnsupportedHTTPOptionFields) {
+		t.Errorf("%d cases for %d predicates", len(driven), len(shared.UnsupportedHTTPOptionFields))
 	}
 }
 
@@ -2751,10 +2751,10 @@ func TestTranslatedFieldsAreNotRejected(t *testing.T) {
 			}
 			// Listed as translated means it reaches the params, not merely that
 			// it is tolerated; HTTPOptions.Timeout is the one that lands
-			// elsewhere, on the context, so it is checked through openaicommon.RequestTimeout.
+			// elsewhere, on the context, so it is checked through shared.RequestTimeout.
 			if tc.field == "HTTPOptions.Timeout" {
-				if openaicommon.RequestTimeout(tc.cfg) == 0 {
-					t.Error("openaicommon.RequestTimeout() = 0, want the configured bound")
+				if shared.RequestTimeout(tc.cfg) == 0 {
+					t.Error("shared.RequestTimeout() = 0, want the configured bound")
 				}
 				return
 			}

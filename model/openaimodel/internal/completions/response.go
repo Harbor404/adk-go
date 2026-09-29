@@ -21,7 +21,7 @@ import (
 	"github.com/openai/openai-go/v3"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/v2/model/openaimodel/internal/openaicommon"
+	"google.golang.org/adk/v2/model/openaimodel/internal/shared"
 )
 
 // convertCompletion converts a Chat Completions response into the generic
@@ -29,10 +29,10 @@ import (
 // paths cannot disagree about tool calls, finish reason or usage.
 func convertCompletion(resp *openai.ChatCompletion) (*genai.GenerateContentResponse, error) {
 	if resp == nil {
-		return nil, openaicommon.ErrEmptyResponse
+		return nil, shared.ErrEmptyResponse
 	}
 	if len(resp.Choices) == 0 {
-		return nil, openaicommon.ErrNoChoices
+		return nil, shared.ErrNoChoices
 	}
 	choice := resp.Choices[0]
 	parts, err := convertMessage(choice.Message)
@@ -40,7 +40,7 @@ func convertCompletion(resp *openai.ChatCompletion) (*genai.GenerateContentRespo
 		return nil, err
 	}
 	if len(parts) == 0 {
-		return nil, openaicommon.ErrNoTextOrToolContent
+		return nil, shared.ErrNoTextOrToolContent
 	}
 	out := &genai.GenerateContentResponse{
 		Candidates: []*genai.Candidate{{
@@ -75,7 +75,7 @@ func convertMessage(msg openai.ChatCompletionMessage) ([]*genai.Part, error) {
 			// Only function tools are ever declared, so nothing can answer it.
 			// adk-python skips such a call; this fails the turn, as the
 			// Responses path does for an output item it cannot convert.
-			return nil, fmt.Errorf("%w: tool call %q", openaicommon.ErrUnsupportedOutputItemType, call.Type)
+			return nil, fmt.Errorf("%w: tool call %q", shared.ErrUnsupportedOutputItemType, call.Type)
 		}
 		fn := call.Function
 		if fn.Name == "" {
@@ -86,7 +86,7 @@ func convertMessage(msg openai.ChatCompletionMessage) ([]*genai.Part, error) {
 			}
 			// Stored in the session, a nameless call would fail every later
 			// request, so the turn fails here instead.
-			return nil, fmt.Errorf("%w (call_id %q)", openaicommon.ErrFunctionCallMissingName, call.ID)
+			return nil, fmt.Errorf("%w (call_id %q)", shared.ErrFunctionCallMissingName, call.ID)
 		}
 		args, err := functionCallArgs(fn.Arguments)
 		if err != nil {
@@ -109,7 +109,7 @@ func functionCallArgs(raw string) (map[string]any, error) {
 	}
 	args := map[string]any{}
 	if err := json.Unmarshal([]byte(raw), &args); err != nil {
-		return nil, fmt.Errorf("%w: %w", openaicommon.ErrFunctionCallArgs, err)
+		return nil, fmt.Errorf("%w: %w", shared.ErrFunctionCallArgs, err)
 	}
 	if args == nil {
 		// The payload was JSON null: the call takes no arguments.
@@ -143,17 +143,17 @@ func finishReason(reason string) genai.FinishReason {
 // metadata, whose field names differ from this endpoint's on every count.
 func convertUsage(usage openai.CompletionUsage) *genai.GenerateContentResponseUsageMetadata {
 	return &genai.GenerateContentResponseUsageMetadata{
-		PromptTokenCount:        openaicommon.SafeInt32(usage.PromptTokens),
-		CandidatesTokenCount:    openaicommon.SafeInt32(usage.CompletionTokens),
-		TotalTokenCount:         openaicommon.SafeInt32(usage.TotalTokens),
-		CachedContentTokenCount: openaicommon.SafeInt32(usage.PromptTokensDetails.CachedTokens),
+		PromptTokenCount:        shared.SafeInt32(usage.PromptTokens),
+		CandidatesTokenCount:    shared.SafeInt32(usage.CompletionTokens),
+		TotalTokenCount:         shared.SafeInt32(usage.TotalTokens),
+		CachedContentTokenCount: shared.SafeInt32(usage.PromptTokensDetails.CachedTokens),
 		PromptTokensDetails: []*genai.ModalityTokenCount{
-			{Modality: genai.MediaModalityText, TokenCount: openaicommon.SafeInt32(usage.PromptTokens)},
+			{Modality: genai.MediaModalityText, TokenCount: shared.SafeInt32(usage.PromptTokens)},
 		},
 		CandidatesTokensDetails: []*genai.ModalityTokenCount{
-			{Modality: genai.MediaModalityText, TokenCount: openaicommon.SafeInt32(usage.CompletionTokens)},
+			{Modality: genai.MediaModalityText, TokenCount: shared.SafeInt32(usage.CompletionTokens)},
 		},
-		ThoughtsTokenCount: openaicommon.SafeInt32(usage.CompletionTokensDetails.ReasoningTokens),
+		ThoughtsTokenCount: shared.SafeInt32(usage.CompletionTokensDetails.ReasoningTokens),
 	}
 }
 

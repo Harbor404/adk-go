@@ -247,7 +247,7 @@ func TestConvertFunctionDeclarationMarshalsStrict(t *testing.T) {
 }
 
 // TestConvertFunctionDeclarationKeepsOptionalParameters pins the constraint that
-// rules out simply reusing openaicommon.EnforceStrictOpenAISchema here: it
+// rules out simply reusing shared.EnforceStrictOpenAISchema here: it
 // rewrites required to list every property, which would make optional tool
 // arguments mandatory.
 //

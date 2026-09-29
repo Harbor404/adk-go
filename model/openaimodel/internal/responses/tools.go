@@ -22,7 +22,7 @@ import (
 	"github.com/openai/openai-go/v3/shared/constant"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/v2/model/openaimodel/internal/openaicommon"
+	"google.golang.org/adk/v2/model/openaimodel/internal/shared"
 )
 
 // convertTools takes our generic tool definitions and converts them into
@@ -34,7 +34,7 @@ func convertTools(cfg *genai.GenerateContentConfig) ([]responses.ToolUnionParam,
 	}
 	var tools []responses.ToolUnionParam
 	for i, tool := range cfg.Tools {
-		if err := openaicommon.EnsureFunctionToolOnly(i, tool); err != nil {
+		if err := shared.EnsureFunctionToolOnly(i, tool); err != nil {
 			return nil, err
 		}
 		for _, decl := range tool.FunctionDeclarations {
@@ -65,12 +65,12 @@ func convertFunctionDeclaration(fn *genai.FunctionDeclaration) (*responses.Funct
 		return nil, fmt.Errorf("openai: function declaration missing name")
 	}
 
-	paramsMap, err := openaicommon.SchemaToMap(fn.Parameters)
+	paramsMap, err := shared.SchemaToMap(fn.Parameters)
 	if err != nil {
 		return nil, err
 	}
 	if paramsMap == nil && fn.ParametersJsonSchema != nil {
-		paramsMap, err = openaicommon.NormalizeSchema(fn.ParametersJsonSchema)
+		paramsMap, err = shared.NormalizeSchema(fn.ParametersJsonSchema)
 		if err != nil {
 			return nil, err
 		}

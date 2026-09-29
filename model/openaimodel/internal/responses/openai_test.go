@@ -34,7 +34,7 @@ import (
 
 	"github.com/openai/openai-go/v3/option"
 
-	"google.golang.org/adk/v2/model/openaimodel/internal/openaicommon"
+	"google.golang.org/adk/v2/model/openaimodel/internal/shared"
 )
 
 func TestModel_Generate(t *testing.T) {
@@ -141,8 +141,8 @@ func TestModel_FailedStatus(t *testing.T) {
 			} else {
 				got, err = runBlocking(t, tc.body)
 			}
-			if !errors.Is(err, openaicommon.ErrResponseFailed) {
-				t.Fatalf("GenerateContent() err = %v, want errors.Is(err, openaicommon.ErrResponseFailed)", err)
+			if !errors.Is(err, shared.ErrResponseFailed) {
+				t.Fatalf("GenerateContent() err = %v, want errors.Is(err, shared.ErrResponseFailed)", err)
 			}
 			for _, want := range []string{"upstream exploded", "resp_123", "server_error"} {
 				if !strings.Contains(err.Error(), want) {
@@ -664,7 +664,7 @@ func TestIncompleteWithoutReason_MatchesBlocking(t *testing.T) {
 // and server/adka2a both read as a failed turn.
 func assertFinishSignal(t *testing.T, resp *model.LLMResponse, wantMessage string) {
 	t.Helper()
-	if !openaicommon.CarriesContent(resp) {
+	if !shared.CarriesContent(resp) {
 		t.Fatal("response carries no content, so this is not the case being asserted")
 	}
 	if resp.ErrorCode != "" || resp.ErrorMessage != "" {
@@ -715,7 +715,7 @@ func TestBlockedTurnSurfacesBlockReason(t *testing.T) {
 			t.Fatalf("streaming err = %v", err)
 		}
 		final := assertTurnShape(t, got)
-		if openaicommon.CarriesContent(final) {
+		if shared.CarriesContent(final) {
 			t.Fatalf("final carries content %+v, so this is not the case being asserted", final.Content)
 		}
 		if final.FinishReason != genai.FinishReasonSafety {
@@ -745,7 +745,7 @@ func TestUnfinishedTurnWithNothingToReadReportsErrorCode(t *testing.T) {
 		t.Fatalf("streaming err = %v", err)
 	}
 	final := assertTurnShape(t, got)
-	if openaicommon.CarriesContent(final) {
+	if shared.CarriesContent(final) {
 		t.Fatalf("final carries content %+v, so this is not the case being asserted", final.Content)
 	}
 	if final.FinishReason != genai.FinishReasonOther {
@@ -781,7 +781,7 @@ func TestModel_GenerateStream_LogprobsDescribeTheAnswer(t *testing.T) {
 		{
 			// Reasoning is not part of the answer the logprobs describe. The
 			// snapshot restates the thought, so it survives superseding the
-			// deltas and openaicommon.AnswerText still has to leave it out.
+			// deltas and shared.AnswerText still has to leave it out.
 			name:         "thoughts do not count against the answer",
 			events:       []string{evCreated, evReasoning, evDelta1, evDelta2, evCompletedReasoning},
 			wantText:     "thinkinghello",
@@ -890,7 +890,7 @@ func TestModel_GenerateStream_EmptyAggregateUsesTerminalEvent(t *testing.T) {
 
 // TestModel_GenerateStream_CreatedOnly pins what a stream that announces a
 // response and then produces nothing yields: no turn at all. Blocking fails
-// with openaicommon.ErrNoOutputItems on the same body, an asymmetry this test records rather
+// with shared.ErrNoOutputItems on the same body, an asymmetry this test records rather
 // than endorses.
 func TestModel_GenerateStream_CreatedOnly(t *testing.T) {
 	got, err := runStream(t, evCreated)
@@ -900,8 +900,8 @@ func TestModel_GenerateStream_CreatedOnly(t *testing.T) {
 	if len(got) != 0 {
 		t.Errorf("stream emitted %d responses, want none", len(got))
 	}
-	if _, err := runBlocking(t, `{"id":"resp_1","model":"stream-model"}`); !errors.Is(err, openaicommon.ErrNoOutputItems) {
-		t.Errorf("blocking err = %v, want %v", err, openaicommon.ErrNoOutputItems)
+	if _, err := runBlocking(t, `{"id":"resp_1","model":"stream-model"}`); !errors.Is(err, shared.ErrNoOutputItems) {
+		t.Errorf("blocking err = %v, want %v", err, shared.ErrNoOutputItems)
 	}
 }
 
@@ -1002,8 +1002,8 @@ func TestModel_GenerateStream_OutputlessTerminalEventKeepsTheReason(t *testing.T
 
 	// With nothing in the aggregator either, there is no turn to report and the
 	// call fails the way blocking does on the same body.
-	if _, err := runStream(t, evCreated, evMaxTokens); !errors.Is(err, openaicommon.ErrNoOutputItems) {
-		t.Errorf("streaming err = %v, want %v", err, openaicommon.ErrNoOutputItems)
+	if _, err := runStream(t, evCreated, evMaxTokens); !errors.Is(err, shared.ErrNoOutputItems) {
+		t.Errorf("streaming err = %v, want %v", err, shared.ErrNoOutputItems)
 	}
 }
 
@@ -1110,11 +1110,11 @@ func TestModel_GenerateStream_AdoptsTerminalToolCalls(t *testing.T) {
 			`{"type":"message","content":[{"type":"output_text","text":"hello"}]},` +
 			`{"type":"function_call","name":"get_weather","call_id":"call_1","arguments":"{"}]}`
 		_, err := runStream(t, evCreated, evDelta1, evDelta2, `{"type":"response.completed","response":`+bodyBadArgs+`}`)
-		if !errors.Is(err, openaicommon.ErrFunctionCallArgs) {
-			t.Errorf("streaming err = %v, want %v", err, openaicommon.ErrFunctionCallArgs)
+		if !errors.Is(err, shared.ErrFunctionCallArgs) {
+			t.Errorf("streaming err = %v, want %v", err, shared.ErrFunctionCallArgs)
 		}
-		if _, err := runBlocking(t, bodyBadArgs); !errors.Is(err, openaicommon.ErrFunctionCallArgs) {
-			t.Errorf("blocking err = %v, want %v", err, openaicommon.ErrFunctionCallArgs)
+		if _, err := runBlocking(t, bodyBadArgs); !errors.Is(err, shared.ErrFunctionCallArgs) {
+			t.Errorf("blocking err = %v, want %v", err, shared.ErrFunctionCallArgs)
 		}
 	})
 }
@@ -1333,8 +1333,8 @@ func TestModel_GenerateStream_TerminalToolCallsAreAuthoritative(t *testing.T) {
 		if diff := cmp.Diff(want, functionCalls(assertTurnShape(t, got))); diff != "" {
 			t.Errorf("streamed function calls mismatch (-want +got):\n%s", diff)
 		}
-		if _, err := runBlocking(t, badArgs); !errors.Is(err, openaicommon.ErrFunctionCallArgs) {
-			t.Errorf("blocking err = %v, want %v", err, openaicommon.ErrFunctionCallArgs)
+		if _, err := runBlocking(t, badArgs); !errors.Is(err, shared.ErrFunctionCallArgs) {
+			t.Errorf("blocking err = %v, want %v", err, shared.ErrFunctionCallArgs)
 		}
 	})
 
@@ -1346,11 +1346,11 @@ func TestModel_GenerateStream_TerminalToolCallsAreAuthoritative(t *testing.T) {
 			`"output":[{"type":"function_call","name":"get_weather","call_id":"call_1","arguments":"{\"city\":\"SF\"}"},` +
 			`{"type":"function_call","name":"lookup","call_id":"call_9","arguments":"{"}]}`
 		if _, err := runStream(t, evCreated, evAdded1, evArgs1,
-			`{"type":"response.completed","response":`+badArgs+`}`); !errors.Is(err, openaicommon.ErrFunctionCallArgs) {
-			t.Errorf("streaming err = %v, want %v", err, openaicommon.ErrFunctionCallArgs)
+			`{"type":"response.completed","response":`+badArgs+`}`); !errors.Is(err, shared.ErrFunctionCallArgs) {
+			t.Errorf("streaming err = %v, want %v", err, shared.ErrFunctionCallArgs)
 		}
-		if _, err := runBlocking(t, badArgs); !errors.Is(err, openaicommon.ErrFunctionCallArgs) {
-			t.Errorf("blocking err = %v, want %v", err, openaicommon.ErrFunctionCallArgs)
+		if _, err := runBlocking(t, badArgs); !errors.Is(err, shared.ErrFunctionCallArgs) {
+			t.Errorf("blocking err = %v, want %v", err, shared.ErrFunctionCallArgs)
 		}
 	})
 
@@ -2164,15 +2164,15 @@ func TestModel_GenerateStream_TruncatedLeavesUsageUnset(t *testing.T) {
 // with a silently empty answer.
 func TestModel_GenerateStream_NoOutputItems(t *testing.T) {
 	got, err := runStream(t, evCreated, evFiltered)
-	if !errors.Is(err, openaicommon.ErrNoOutputItems) {
-		t.Errorf("streaming err = %v, want %v", err, openaicommon.ErrNoOutputItems)
+	if !errors.Is(err, shared.ErrNoOutputItems) {
+		t.Errorf("streaming err = %v, want %v", err, shared.ErrNoOutputItems)
 	}
 	if len(got) != 0 {
 		t.Errorf("stream emitted %d responses, want none", len(got))
 	}
 	const filteredBody = `{"id":"resp_1","model":"stream-model","status":"incomplete","incomplete_details":{"reason":"content_filter"}}`
-	if _, err := runBlocking(t, filteredBody); !errors.Is(err, openaicommon.ErrNoOutputItems) {
-		t.Errorf("blocking err = %v, want %v", err, openaicommon.ErrNoOutputItems)
+	if _, err := runBlocking(t, filteredBody); !errors.Is(err, shared.ErrNoOutputItems) {
+		t.Errorf("blocking err = %v, want %v", err, shared.ErrNoOutputItems)
 	}
 }
 
@@ -2402,8 +2402,8 @@ func TestModel_GenerateContent_ThoughtOnlyRequestFailsBeforeSending(t *testing.T
 					gotErr = err
 				}
 			}
-			if !errors.Is(gotErr, openaicommon.ErrNoContents) {
-				t.Errorf("GenerateContent() err = %v, want it to wrap %v", gotErr, openaicommon.ErrNoContents)
+			if !errors.Is(gotErr, shared.ErrNoContents) {
+				t.Errorf("GenerateContent() err = %v, want it to wrap %v", gotErr, shared.ErrNoContents)
 			}
 			if calls != 0 {
 				t.Errorf("model was called %d times, want 0", calls)

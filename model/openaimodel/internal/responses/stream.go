@@ -22,7 +22,7 @@ import (
 	"github.com/openai/openai-go/v3/responses"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/v2/model/openaimodel/internal/openaicommon"
+	"google.golang.org/adk/v2/model/openaimodel/internal/shared"
 )
 
 // streamTranslator helps us process OpenAI streaming events by buffering
@@ -51,28 +51,28 @@ func (t *streamTranslator) process(evt responses.ResponseStreamEventUnion) (*gen
 			return nil, nil
 		}
 		// For text deltas, we create a response with a single text part.
-		return openaicommon.SinglePartResponse(&genai.Part{Text: delta.Delta}), nil
+		return shared.SinglePartResponse(&genai.Part{Text: delta.Delta}), nil
 	case responseRefusalDelta:
 		delta := evt.AsResponseRefusalDelta()
 		if delta.Delta == "" {
 			return nil, nil
 		}
 		// Blocking responses expose refusals as text, so streaming does the same.
-		return openaicommon.SinglePartResponse(&genai.Part{Text: delta.Delta}), nil
+		return shared.SinglePartResponse(&genai.Part{Text: delta.Delta}), nil
 	case responseReasoningTextDelta:
 		delta := evt.AsResponseReasoningTextDelta()
 		if delta.Delta == "" {
 			return nil, nil
 		}
 		// Reasoning text deltas are treated as thought parts.
-		return openaicommon.SinglePartResponse(&genai.Part{Text: delta.Delta, Thought: true}), nil
+		return shared.SinglePartResponse(&genai.Part{Text: delta.Delta, Thought: true}), nil
 	case responseReasoningSummaryTextDelta:
 		delta := evt.AsResponseReasoningSummaryTextDelta()
 		if delta.Delta == "" {
 			return nil, nil
 		}
 		// Reasoning summary deltas are also treated as thought parts.
-		return openaicommon.SinglePartResponse(&genai.Part{Text: delta.Delta, Thought: true}), nil
+		return shared.SinglePartResponse(&genai.Part{Text: delta.Delta, Thought: true}), nil
 	case responseFunctionCallArgumentsDelta:
 		delta := evt.AsResponseFunctionCallArgumentsDelta()
 		if delta.Delta != "" {
@@ -88,7 +88,7 @@ func (t *streamTranslator) process(evt responses.ResponseStreamEventUnion) (*gen
 		if err != nil {
 			return nil, err
 		}
-		return openaicommon.SinglePartResponse(part), nil
+		return shared.SinglePartResponse(part), nil
 	case responseFailed:
 		failed := evt.AsResponseFailed()
 		// Built by the same renderer the blocking path uses, so one server
@@ -98,7 +98,7 @@ func (t *streamTranslator) process(evt responses.ResponseStreamEventUnion) (*gen
 		// Generic stream errors are also returned.
 		// Same treatment as a failed response body: the text is the server's,
 		// so it is capped, and quoted rather than interpolated bare.
-		if msg := openaicommon.ClipServerText(evt.Message); msg != "" {
+		if msg := shared.ClipServerText(evt.Message); msg != "" {
 			return nil, fmt.Errorf("openai stream error: %q", msg)
 		}
 		return nil, fmt.Errorf("openai stream error")

@@ -24,7 +24,7 @@ import (
 	"github.com/openai/openai-go/v3"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/v2/model/openaimodel/internal/openaicommon"
+	"google.golang.org/adk/v2/model/openaimodel/internal/shared"
 )
 
 // decodeCompletion builds a ChatCompletion from the JSON a provider would send,
@@ -160,7 +160,7 @@ func TestConvertCompletion_EmptyToolArguments(t *testing.T) {
 
 // TestConvertCompletion_UnusableToolCalls pins that no call reaches the
 // caller without a function name: stored in the session, a nameless call fails
-// every later request with openaicommon.ErrFunctionCallMissingName.
+// every later request with shared.ErrFunctionCallMissingName.
 func TestConvertCompletion_UnusableToolCalls(t *testing.T) {
 	for _, tt := range []struct {
 		name    string
@@ -170,24 +170,24 @@ func TestConvertCompletion_UnusableToolCalls(t *testing.T) {
 		{
 			name:    "custom tool call",
 			call:    `{"id":"call_9","type":"custom","custom":{"name":"grep","input":"x"}}`,
-			wantErr: openaicommon.ErrUnsupportedOutputItemType,
+			wantErr: shared.ErrUnsupportedOutputItemType,
 		},
 		{
 			name:    "function call without a name",
 			call:    `{"id":"call_9","type":"function","function":{"name":"","arguments":"{}"}}`,
-			wantErr: openaicommon.ErrFunctionCallMissingName,
+			wantErr: shared.ErrFunctionCallMissingName,
 		},
 		// Either an id or arguments shows a call was made, so neither alone is
 		// read as a padded index.
 		{
 			name:    "arguments without a name or id",
 			call:    `{"id":"","type":"function","function":{"name":"","arguments":"{\"city\":\"Lisbon\"}"}}`,
-			wantErr: openaicommon.ErrFunctionCallMissingName,
+			wantErr: shared.ErrFunctionCallMissingName,
 		},
 		{
 			name:    "id without a name or arguments",
 			call:    `{"id":"call_9","type":"function","function":{"name":"","arguments":""}}`,
-			wantErr: openaicommon.ErrFunctionCallMissingName,
+			wantErr: shared.ErrFunctionCallMissingName,
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -226,8 +226,8 @@ func TestConvertCompletion_UnparseableToolArguments(t *testing.T) {
 			"role":"assistant","tool_calls":[{"id":"call_9","type":"function",
 			"function":{"name":"get_weather","arguments":"{not json"}}]}}]}`)
 	_, err := convertCompletion(resp)
-	if !errors.Is(err, openaicommon.ErrFunctionCallArgs) {
-		t.Fatalf("err = %v, want %v", err, openaicommon.ErrFunctionCallArgs)
+	if !errors.Is(err, shared.ErrFunctionCallArgs) {
+		t.Fatalf("err = %v, want %v", err, shared.ErrFunctionCallArgs)
 	}
 	// Conversion aborts on the first bad call, so the error has to identify it.
 	if !strings.Contains(err.Error(), "get_weather") || !strings.Contains(err.Error(), "call_9") {
@@ -241,12 +241,12 @@ func TestConvertCompletion_Empty(t *testing.T) {
 		resp *openai.ChatCompletion
 		want error
 	}{
-		{name: "nil", resp: nil, want: openaicommon.ErrEmptyResponse},
-		{name: "no choices", resp: decodeCompletion(t, `{"id":"c","model":"m","choices":[]}`), want: openaicommon.ErrNoChoices},
+		{name: "nil", resp: nil, want: shared.ErrEmptyResponse},
+		{name: "no choices", resp: decodeCompletion(t, `{"id":"c","model":"m","choices":[]}`), want: shared.ErrNoChoices},
 		{
 			name: "choice with nothing to read",
 			resp: decodeCompletion(t, `{"id":"c","model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":""}}]}`),
-			want: openaicommon.ErrNoTextOrToolContent,
+			want: shared.ErrNoTextOrToolContent,
 		},
 	}
 	for _, tt := range tests {

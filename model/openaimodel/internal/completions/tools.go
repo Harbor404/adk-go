@@ -19,10 +19,10 @@ import (
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/packages/param"
-	"github.com/openai/openai-go/v3/shared"
+	oaishared "github.com/openai/openai-go/v3/shared"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/v2/model/openaimodel/internal/openaicommon"
+	"google.golang.org/adk/v2/model/openaimodel/internal/shared"
 )
 
 // convertTools converts function declarations into Chat Completions tools,
@@ -34,7 +34,7 @@ func convertTools(cfg *genai.GenerateContentConfig) ([]openai.ChatCompletionTool
 	}
 	var tools []openai.ChatCompletionToolUnionParam
 	for i, tool := range cfg.Tools {
-		if err := openaicommon.EnsureFunctionToolOnly(i, tool); err != nil {
+		if err := shared.EnsureFunctionToolOnly(i, tool); err != nil {
 			return nil, err
 		}
 		for _, decl := range tool.FunctionDeclarations {
@@ -58,12 +58,12 @@ func convertFunctionDeclaration(fn *genai.FunctionDeclaration) (*openai.ChatComp
 		return nil, fmt.Errorf("openai: function declaration missing name")
 	}
 
-	paramsMap, err := openaicommon.SchemaToMap(fn.Parameters)
+	paramsMap, err := shared.SchemaToMap(fn.Parameters)
 	if err != nil {
 		return nil, err
 	}
 	if paramsMap == nil && fn.ParametersJsonSchema != nil {
-		paramsMap, err = openaicommon.NormalizeSchema(fn.ParametersJsonSchema)
+		paramsMap, err = shared.NormalizeSchema(fn.ParametersJsonSchema)
 		if err != nil {
 			return nil, err
 		}
@@ -75,7 +75,7 @@ func convertFunctionDeclaration(fn *genai.FunctionDeclaration) (*openai.ChatComp
 		}
 	}
 
-	def := shared.FunctionDefinitionParam{
+	def := oaishared.FunctionDefinitionParam{
 		Name:       fn.Name,
 		Parameters: paramsMap,
 	}

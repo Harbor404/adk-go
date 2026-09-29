@@ -26,7 +26,7 @@ import (
 
 	"google.golang.org/adk/v2/model"
 
-	"google.golang.org/adk/v2/model/openaimodel/internal/openaicommon"
+	"google.golang.org/adk/v2/model/openaimodel/internal/shared"
 )
 
 // chatWire marshals the params the way the SDK sends them, so assertions read
@@ -253,22 +253,22 @@ func TestBuildParams_ThoughtOnlyTurnProducesNoMessage(t *testing.T) {
 	_, err := buildParams("m", &model.LLMRequest{Contents: []*genai.Content{
 		{Role: "model", Parts: []*genai.Part{{Text: "thinking", Thought: true}}},
 	}})
-	if !errors.Is(err, openaicommon.ErrNoContents) {
-		t.Fatalf("err = %v, want %v", err, openaicommon.ErrNoContents)
+	if !errors.Is(err, shared.ErrNoContents) {
+		t.Fatalf("err = %v, want %v", err, shared.ErrNoContents)
 	}
 }
 
 func TestBuildParams_NoContents(t *testing.T) {
 	_, err := buildParams("m", &model.LLMRequest{})
-	if !errors.Is(err, openaicommon.ErrNoContents) {
-		t.Fatalf("err = %v, want %v", err, openaicommon.ErrNoContents)
+	if !errors.Is(err, shared.ErrNoContents) {
+		t.Fatalf("err = %v, want %v", err, shared.ErrNoContents)
 	}
 }
 
 func TestBuildParams_NilRequest(t *testing.T) {
 	_, err := buildParams("m", nil)
-	if !errors.Is(err, openaicommon.ErrRequestNil) {
-		t.Fatalf("err = %v, want %v", err, openaicommon.ErrRequestNil)
+	if !errors.Is(err, shared.ErrRequestNil) {
+		t.Fatalf("err = %v, want %v", err, shared.ErrRequestNil)
 	}
 }
 
@@ -472,13 +472,13 @@ func TestApplyGenerationConfig_RejectedFields(t *testing.T) {
 		cfg  *genai.GenerateContentConfig
 		want error
 	}{
-		{name: "topK", cfg: &genai.GenerateContentConfig{TopK: &topK}, want: openaicommon.ErrTopKNotSupported},
-		{name: "candidate count", cfg: &genai.GenerateContentConfig{CandidateCount: 2}, want: openaicommon.ErrMultipleCandidatesNotSupported},
-		{name: "labels", cfg: &genai.GenerateContentConfig{Labels: map[string]string{"a": "b"}}, want: openaicommon.ErrLabelsNotSupported},
-		{name: "safety settings", cfg: &genai.GenerateContentConfig{SafetySettings: []*genai.SafetySetting{{}}}, want: openaicommon.ErrSafetySettingsNotSupported},
-		{name: "mime type", cfg: &genai.GenerateContentConfig{ResponseMIMEType: "text/csv"}, want: openaicommon.ErrUnsupportedMIMEType},
-		{name: "cached content", cfg: &genai.GenerateContentConfig{CachedContent: "c"}, want: openaicommon.ErrUnsupportedConfigField},
-		{name: "speech config", cfg: &genai.GenerateContentConfig{SpeechConfig: &genai.SpeechConfig{}}, want: openaicommon.ErrUnsupportedConfigField},
+		{name: "topK", cfg: &genai.GenerateContentConfig{TopK: &topK}, want: shared.ErrTopKNotSupported},
+		{name: "candidate count", cfg: &genai.GenerateContentConfig{CandidateCount: 2}, want: shared.ErrMultipleCandidatesNotSupported},
+		{name: "labels", cfg: &genai.GenerateContentConfig{Labels: map[string]string{"a": "b"}}, want: shared.ErrLabelsNotSupported},
+		{name: "safety settings", cfg: &genai.GenerateContentConfig{SafetySettings: []*genai.SafetySetting{{}}}, want: shared.ErrSafetySettingsNotSupported},
+		{name: "mime type", cfg: &genai.GenerateContentConfig{ResponseMIMEType: "text/csv"}, want: shared.ErrUnsupportedMIMEType},
+		{name: "cached content", cfg: &genai.GenerateContentConfig{CachedContent: "c"}, want: shared.ErrUnsupportedConfigField},
+		{name: "speech config", cfg: &genai.GenerateContentConfig{SpeechConfig: &genai.SpeechConfig{}}, want: shared.ErrUnsupportedConfigField},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -618,8 +618,8 @@ func TestApplyThinkingConfig_RejectsNonsenseBudget(t *testing.T) {
 		Contents: []*genai.Content{{Role: "user", Parts: []*genai.Part{{Text: "hi"}}}},
 		Config:   &genai.GenerateContentConfig{ThinkingConfig: &genai.ThinkingConfig{ThinkingBudget: &budget}},
 	})
-	if !errors.Is(err, openaicommon.ErrUnsupportedConfigField) {
-		t.Fatalf("err = %v, want %v", err, openaicommon.ErrUnsupportedConfigField)
+	if !errors.Is(err, shared.ErrUnsupportedConfigField) {
+		t.Fatalf("err = %v, want %v", err, shared.ErrUnsupportedConfigField)
 	}
 }
 

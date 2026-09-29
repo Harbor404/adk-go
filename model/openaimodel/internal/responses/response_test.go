@@ -24,7 +24,7 @@ import (
 	"github.com/openai/openai-go/v3/responses"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/v2/model/openaimodel/internal/openaicommon"
+	"google.golang.org/adk/v2/model/openaimodel/internal/shared"
 )
 
 func TestConvertResponse_Text(t *testing.T) {
@@ -257,8 +257,8 @@ func TestConvertResponse_FailedStatus(t *testing.T) {
 			if got != nil {
 				t.Errorf("convertResponse() = %+v, want nil alongside the error", got)
 			}
-			if !errors.Is(err, openaicommon.ErrResponseFailed) {
-				t.Fatalf("error = %v, want errors.Is(err, openaicommon.ErrResponseFailed)", err)
+			if !errors.Is(err, shared.ErrResponseFailed) {
+				t.Fatalf("error = %v, want errors.Is(err, shared.ErrResponseFailed)", err)
 			}
 			if got := err.Error(); got != tc.wantErr {
 				t.Errorf("error = %q, want %q", got, tc.wantErr)
@@ -612,8 +612,8 @@ func TestConvertFunctionCall_DecodedArguments(t *testing.T) {
 				t.Fatalf("convertFunctionCall() error = %v, wantErr %v", err, tc.wantErr)
 			}
 			if tc.wantErr {
-				if !errors.Is(err, openaicommon.ErrFunctionCallArgs) {
-					t.Errorf("error = %v, want errors.Is(err, openaicommon.ErrFunctionCallArgs)", err)
+				if !errors.Is(err, shared.ErrFunctionCallArgs) {
+					t.Errorf("error = %v, want errors.Is(err, shared.ErrFunctionCallArgs)", err)
 				}
 				return
 			}
@@ -691,8 +691,8 @@ func TestConvertResponse_BadFunctionCallArgs(t *testing.T) {
 	if got != nil {
 		t.Errorf("convertResponse() = %+v, want nil alongside the error", got)
 	}
-	if !errors.Is(err, openaicommon.ErrFunctionCallArgs) {
-		t.Errorf("error = %v, want errors.Is(err, openaicommon.ErrFunctionCallArgs)", err)
+	if !errors.Is(err, shared.ErrFunctionCallArgs) {
+		t.Errorf("error = %v, want errors.Is(err, shared.ErrFunctionCallArgs)", err)
 	}
 	for _, want := range []string{`write_file`, `call-1`} {
 		if !strings.Contains(err.Error(), want) {
@@ -970,14 +970,14 @@ func TestConvertOutputItems(t *testing.T) {
 		{
 			name:    "empty items",
 			items:   nil,
-			wantErr: openaicommon.ErrNoOutputItems,
+			wantErr: shared.ErrNoOutputItems,
 		},
 		{
 			name: "invalid type",
 			items: []responses.ResponseOutputItemUnion{
 				{Type: "invalid"},
 			},
-			wantErr: openaicommon.ErrUnsupportedOutputItemType,
+			wantErr: shared.ErrUnsupportedOutputItemType,
 		},
 		{
 			name: "invalid message content type",
@@ -989,7 +989,7 @@ func TestConvertOutputItems(t *testing.T) {
 					},
 				},
 			},
-			wantErr: openaicommon.ErrUnsupportedMessageContentType,
+			wantErr: shared.ErrUnsupportedMessageContentType,
 		},
 		{
 			name: "empty message content",
@@ -1001,7 +1001,7 @@ func TestConvertOutputItems(t *testing.T) {
 					},
 				},
 			},
-			wantErr: openaicommon.ErrNoTextOrToolContent,
+			wantErr: shared.ErrNoTextOrToolContent,
 		},
 	}
 

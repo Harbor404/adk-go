@@ -22,27 +22,27 @@ import (
 
 	"github.com/openai/openai-go/v3/packages/param"
 	"github.com/openai/openai-go/v3/responses"
-	"github.com/openai/openai-go/v3/shared"
+	oaishared "github.com/openai/openai-go/v3/shared"
 	"github.com/openai/openai-go/v3/shared/constant"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/model"
 
-	"google.golang.org/adk/v2/model/openaimodel/internal/openaicommon"
+	"google.golang.org/adk/v2/model/openaimodel/internal/shared"
 )
 
 // buildParams converts a generic LLMRequest into the OpenAI-specific
 // responses.ResponseNewParams format, preparing it for an API call.
 func buildParams(modelName string, req *model.LLMRequest) (responses.ResponseNewParams, error) {
 	if req == nil {
-		return responses.ResponseNewParams{}, openaicommon.ErrRequestNil
+		return responses.ResponseNewParams{}, shared.ErrRequestNil
 	}
 
 	params := responses.ResponseNewParams{
-		Model: shared.ResponsesModel(modelName),
+		Model: oaishared.ResponsesModel(modelName),
 	}
 	if req.Model != "" {
-		params.Model = shared.ResponsesModel(req.Model)
+		params.Model = oaishared.ResponsesModel(req.Model)
 	}
 
 	// We convert the generic content parts into OpenAI's input format.
@@ -57,9 +57,9 @@ func buildParams(modelName string, req *model.LLMRequest) (responses.ResponseNew
 			// dropped, so a request that was empty on arrival still returns
 			// the bare sentinel a caller may compare against directly.
 			return responses.ResponseNewParams{}, fmt.Errorf(
-				"%w: every part was dropped as replayed reasoning", openaicommon.ErrNoContents)
+				"%w: every part was dropped as replayed reasoning", shared.ErrNoContents)
 		}
-		return responses.ResponseNewParams{}, openaicommon.ErrNoContents
+		return responses.ResponseNewParams{}, shared.ErrNoContents
 	}
 	params.Input = responses.ResponseNewParamsInputUnion{
 		OfInputItemList: input,
@@ -99,7 +99,7 @@ func buildParams(modelName string, req *model.LLMRequest) (responses.ResponseNew
 func convertContents(contents []*genai.Content) (responses.ResponseInputParam, bool, error) {
 	var (
 		items            responses.ResponseInputParam
-		tracker          openaicommon.CallTracker
+		tracker          shared.CallTracker
 		textParts        []string
 		droppedReasoning bool
 		curRole          genai.Role = genai.RoleUser
@@ -141,7 +141,7 @@ func convertContents(contents []*genai.Content) (responses.ResponseInputParam, b
 			// Reported before anything is emitted, so that a field this
 			// package cannot send is named even when text or a call rides on
 			// the same part and would otherwise have carried it out unnoticed.
-			if field := openaicommon.UnsupportedPayload(part); field != "" {
+			if field := shared.UnsupportedPayload(part); field != "" {
 				return nil, false, fmt.Errorf("openai: unsupported content part: %s", field)
 			}
 			// Text is read independently of a call or a response because one
@@ -151,7 +151,7 @@ func convertContents(contents []*genai.Content) (responses.ResponseInputParam, b
 			switch {
 			case sendText:
 				textParts = append(textParts, part.Text)
-			case part.Text != "" || openaicommon.ReplayedReasoning(part):
+			case part.Text != "" || shared.ReplayedReasoning(part):
 				// Dropping reasoning must not hide a bad role, so the check
 				// still runs. The drop counts toward the emptied-request
 				// report only when it suppressed text the model would
@@ -184,7 +184,7 @@ func convertContents(contents []*genai.Content) (responses.ResponseInputParam, b
 					return nil, false, err
 				}
 				items = append(items, responses.ResponseInputItemUnionParam{OfFunctionCallOutput: respParam})
-			case !sendText && !openaicommon.ReplayedReasoning(part):
+			case !sendText && !shared.ReplayedReasoning(part):
 				// Nothing in the part reaches the request. It keeps the
 				// unsupported-content-part prefix the single message used
 				// before, so a caller matching on that still matches here.
@@ -276,12 +276,12 @@ func normalizeRole(role genai.Role) (responses.EasyInputMessageRole, error) {
 // newFunctionCall converts a generic genai.FunctionCall into an OpenAI-specific
 // ResponseFunctionToolCallParam. We generate a unique callID if one isn't
 // provided, and then marshal the function arguments into a JSON string.
-func newFunctionCall(t *openaicommon.CallTracker, fc *genai.FunctionCall) (*responses.ResponseFunctionToolCallParam, error) {
+func newFunctionCall(t *shared.CallTracker, fc *genai.FunctionCall) (*responses.ResponseFunctionToolCallParam, error) {
 	if fc.Name == "" {
-		return nil, openaicommon.ErrFunctionCallMissingName
+		return nil, shared.ErrFunctionCallMissingName
 	}
 	callID := t.TakeCallID(fc)
-	args, err := openaicommon.MarshalFunctionArgs(fc.Args)
+	args, err := shared.MarshalFunctionArgs(fc.Args)
 	if err != nil {
 		return nil, err
 	}
@@ -297,7 +297,7 @@ func newFunctionCall(t *openaicommon.CallTracker, fc *genai.FunctionCall) (*resp
 // ResponseInputItemFunctionCallOutputParam. We try to match the response to a pending
 // function call. If an explicit callID is provided, we find and remove it from our
 // pending list. Otherwise, we assume it corresponds to the oldest pending call.
-func newFunctionResponse(t *openaicommon.CallTracker, fr *genai.FunctionResponse) (*responses.ResponseInputItemFunctionCallOutputParam, error) {
+func newFunctionResponse(t *shared.CallTracker, fr *genai.FunctionResponse) (*responses.ResponseInputItemFunctionCallOutputParam, error) {
 	callID, err := t.ResolveResponseID(fr)
 	if err != nil {
 		return nil, err
@@ -329,19 +329,19 @@ func applyGenerationConfig(params *responses.ResponseNewParams, cfg *genai.Gener
 		params.TopP = param.NewOpt(float64(*cfg.TopP))
 	}
 	if cfg.TopK != nil {
-		return openaicommon.ErrTopKNotSupported
+		return shared.ErrTopKNotSupported
 	}
 	if cfg.MaxOutputTokens > 0 {
 		params.MaxOutputTokens = param.NewOpt(int64(cfg.MaxOutputTokens))
 	}
 	if len(cfg.StopSequences) > 0 {
-		return openaicommon.ErrStopSequencesNotSupported
+		return shared.ErrStopSequencesNotSupported
 	}
 	if cfg.CandidateCount > 1 {
-		return openaicommon.ErrMultipleCandidatesNotSupported
+		return shared.ErrMultipleCandidatesNotSupported
 	}
 	if cfg.FrequencyPenalty != nil || cfg.PresencePenalty != nil {
-		return openaicommon.ErrPenaltiesNotSupported
+		return shared.ErrPenaltiesNotSupported
 	}
 	if cfg.ResponseLogprobs {
 		if cfg.Logprobs != nil {
@@ -353,7 +353,7 @@ func applyGenerationConfig(params *responses.ResponseNewParams, cfg *genai.Gener
 		params.Include = append(params.Include, responses.ResponseIncludableMessageOutputTextLogprobs)
 	}
 	if cfg.SystemInstruction != nil {
-		inst, err := openaicommon.FlattenContentText(cfg.SystemInstruction)
+		inst, err := shared.FlattenContentText(cfg.SystemInstruction)
 		if err != nil {
 			return fmt.Errorf("openai: system instruction: %w", err)
 		}
@@ -362,11 +362,11 @@ func applyGenerationConfig(params *responses.ResponseNewParams, cfg *genai.Gener
 		}
 	}
 	if cfg.ResponseMIMEType != "" && cfg.ResponseMIMEType != "text/plain" && cfg.ResponseMIMEType != "application/json" {
-		return fmt.Errorf("%w: %s", openaicommon.ErrUnsupportedMIMEType, cfg.ResponseMIMEType)
+		return fmt.Errorf("%w: %s", shared.ErrUnsupportedMIMEType, cfg.ResponseMIMEType)
 	}
 	if cfg.ResponseMIMEType == "application/json" || cfg.ResponseSchema != nil || cfg.ResponseJsonSchema != nil {
 		if cfg.ResponseSchema == nil && cfg.ResponseJsonSchema == nil {
-			obj := shared.NewResponseFormatJSONObjectParam()
+			obj := oaishared.NewResponseFormatJSONObjectParam()
 			params.Text = responses.ResponseTextConfigParam{
 				Format: responses.ResponseFormatTextConfigUnionParam{
 					OfJSONObject: &obj,
@@ -385,10 +385,10 @@ func applyGenerationConfig(params *responses.ResponseNewParams, cfg *genai.Gener
 		}
 	}
 	if cfg.Labels != nil {
-		return openaicommon.ErrLabelsNotSupported
+		return shared.ErrLabelsNotSupported
 	}
 	if cfg.SafetySettings != nil {
-		return openaicommon.ErrSafetySettingsNotSupported
+		return shared.ErrSafetySettingsNotSupported
 	}
 	if err := applyThinkingConfig(params, cfg.ThinkingConfig); err != nil {
 		return err
@@ -396,15 +396,15 @@ func applyGenerationConfig(params *responses.ResponseNewParams, cfg *genai.Gener
 	if cfg.ServiceTier != "" {
 		tier, ok := serviceTiers[cfg.ServiceTier]
 		if !ok {
-			return fmt.Errorf("%w: ServiceTier %q", openaicommon.ErrUnsupportedConfigField, cfg.ServiceTier)
+			return fmt.Errorf("%w: ServiceTier %q", shared.ErrUnsupportedConfigField, cfg.ServiceTier)
 		}
 		params.ServiceTier = tier
 	}
-	if err := openaicommon.RejectUntranslatableValues(cfg); err != nil {
+	if err := shared.RejectUntranslatableValues(cfg); err != nil {
 		return err
 	}
 	// Last, so the named errors above win when a caller sets both.
-	return openaicommon.RejectUnsupportedConfigFields(cfg)
+	return shared.RejectUnsupportedConfigFields(cfg)
 }
 
 // serviceTiers maps genai's processing tiers onto the Responses equivalents.
@@ -426,17 +426,17 @@ func applyThinkingConfig(params *responses.ResponseNewParams, cfg *genai.Thinkin
 	if cfg == nil {
 		return nil
 	}
-	effort, err := openaicommon.ReasoningEffortFor(cfg)
+	effort, err := shared.ReasoningEffortFor(cfg)
 	if err != nil {
 		return err
 	}
 	// A reasoning block holding neither is the zero value, which omitzero drops
 	// from the request, so an unasked-for one costs nothing on the wire.
-	params.Reasoning = shared.ReasoningParam{Effort: effort}
+	params.Reasoning = oaishared.ReasoningParam{Effort: effort}
 	// IncludeThoughts alone leaves Effort unset, letting the model pick it, and
 	// asks only for the summaries that response.go surfaces as thought parts.
 	if cfg.IncludeThoughts {
-		params.Reasoning.Summary = shared.ReasoningSummaryAuto
+		params.Reasoning.Summary = oaishared.ReasoningSummaryAuto
 	}
 	return nil
 }
@@ -451,16 +451,16 @@ func newJSONSchemaFormat(cfg *genai.GenerateContentConfig) (*responses.ResponseF
 	)
 	switch {
 	case cfg.ResponseJsonSchema != nil:
-		schema, err = openaicommon.NormalizeSchema(cfg.ResponseJsonSchema)
+		schema, err = shared.NormalizeSchema(cfg.ResponseJsonSchema)
 	case cfg.ResponseSchema != nil:
-		schema, err = openaicommon.SchemaToMap(cfg.ResponseSchema)
+		schema, err = shared.SchemaToMap(cfg.ResponseSchema)
 	default:
 		return nil, fmt.Errorf("openai: json schema requested without schema")
 	}
 	if err != nil {
 		return nil, err
 	}
-	openaicommon.EnforceStrictOpenAISchema(schema)
+	shared.EnforceStrictOpenAISchema(schema)
 	name := "adk_response"
 	if cfg.ResponseSchema != nil && cfg.ResponseSchema.Title != "" {
 		name = cfg.ResponseSchema.Title

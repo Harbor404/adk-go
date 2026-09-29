@@ -29,7 +29,7 @@ import (
 	"google.golang.org/adk/v2/internal/llminternal/converters"
 	"google.golang.org/adk/v2/model"
 
-	"google.golang.org/adk/v2/model/openaimodel/internal/openaicommon"
+	"google.golang.org/adk/v2/model/openaimodel/internal/shared"
 )
 
 // Model talks to the Chat Completions API, the surface OpenAI-compatible
@@ -46,13 +46,13 @@ func (m *Model) Name() string { return m.name }
 // and calls the API, streaming or not.
 func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	if req == nil {
-		return openaicommon.SingleErrorSequence(openaicommon.ErrRequestNil)
+		return shared.SingleErrorSequence(shared.ErrRequestNil)
 	}
 	params, err := buildParams(m.name, req)
 	if err != nil {
-		return openaicommon.SingleErrorSequence(err)
+		return shared.SingleErrorSequence(err)
 	}
-	timeout := openaicommon.RequestTimeout(req.Config)
+	timeout := shared.RequestTimeout(req.Config)
 	if stream {
 		return m.generateStream(ctx, params, timeout)
 	}
@@ -134,7 +134,7 @@ func (m *Model) generateStream(ctx context.Context, params openai.ChatCompletion
 		completion := translator.completion()
 		genaiResp, err := convertCompletion(completion)
 		switch {
-		case err == nil && !openaicommon.CarriesContent(final):
+		case err == nil && !shared.CarriesContent(final):
 			// The deltas contributed nothing that survived aggregation, which is
 			// what a turn of nothing but tool calls looks like. The snapshot
 			// holds the whole turn.
@@ -144,16 +144,16 @@ func (m *Model) generateStream(ctx context.Context, params openai.ChatCompletion
 			// aggregate whenever it retains everything already streamed, and
 			// otherwise the streamed text stands with the snapshot's calls added.
 			content := genaiResp.Candidates[0].Content
-			if openaicommon.CompletedContentSupersedes(final.Content, content) {
+			if shared.CompletedContentSupersedes(final.Content, content) {
 				final.Content = content
 			} else {
-				kept, _, _ := openaicommon.PartsWithoutCalls(final.Content)
+				kept, _, _ := shared.PartsWithoutCalls(final.Content)
 				final.Content = &genai.Content{
 					Role:  final.Content.Role,
 					Parts: slices.Concat(kept, functionCallParts(content)),
 				}
 			}
-		case openaicommon.CarriesContent(final) && openaicommon.IsEmptyOutput(err):
+		case shared.CarriesContent(final) && shared.IsEmptyOutput(err):
 			// The snapshot holds nothing but the deltas produced a turn, so
 			// report it rather than fail a call the model answered. An unusable
 			// snapshot, such as a tool call whose arguments do not parse, fails

@@ -23,7 +23,7 @@ import (
 
 	"github.com/openai/openai-go/v3/responses"
 
-	"google.golang.org/adk/v2/model/openaimodel/internal/openaicommon"
+	"google.golang.org/adk/v2/model/openaimodel/internal/shared"
 )
 
 // FuzzFailedResponseError pins what no server-chosen string may do to the error
@@ -58,12 +58,12 @@ func FuzzFailedResponseError(f *testing.F) {
 		// an unprintable astral one — as the ten characters of \U0010ffff, and
 		// wraps the result in two quotes. Three such fields, plus the labels
 		// and the sentinel, is the ceiling.
-		const maxRendered = 3*(10*(openaicommon.MaxServerTextRunes+1)+2) + 64
+		const maxRendered = 3*(10*(shared.MaxServerTextRunes+1)+2) + 64
 		if n := utf8.RuneCountInString(got); n > maxRendered {
 			t.Errorf("failedResponseError() produced %d runes, want at most %d", n, maxRendered)
 		}
-		if !errors.Is(err, openaicommon.ErrResponseFailed) {
-			t.Errorf("failedResponseError() = %v, want it to wrap openaicommon.ErrResponseFailed", err)
+		if !errors.Is(err, shared.ErrResponseFailed) {
+			t.Errorf("failedResponseError() = %v, want it to wrap shared.ErrResponseFailed", err)
 		}
 	})
 }
@@ -107,7 +107,7 @@ func TestFailedResponseError_ServerText(t *testing.T) {
 			Error:  responses.ResponseError{Message: strings.Repeat("A", 1<<20)},
 		})
 		// Runes, because that is the unit the cap counts in.
-		if got, max := utf8.RuneCountInString(err.Error()), openaicommon.MaxServerTextRunes+64; got > max {
+		if got, max := utf8.RuneCountInString(err.Error()), shared.MaxServerTextRunes+64; got > max {
 			t.Errorf("error is %d runes, want at most %d", got, max)
 		}
 		if !strings.HasSuffix(err.Error(), `…"`) {
@@ -124,7 +124,7 @@ func TestFailedResponseError_ServerText(t *testing.T) {
 		// Non-ASCII on purpose. Both runes are printable, so %q emits them as
 		// themselves — one rune, several bytes each — and a bound counted in
 		// bytes would trip on the encoding rather than on any real growth.
-		if got, max := utf8.RuneCountInString(err.Error()), 3*(openaicommon.MaxServerTextRunes+1)+64; got > max {
+		if got, max := utf8.RuneCountInString(err.Error()), 3*(shared.MaxServerTextRunes+1)+64; got > max {
 			t.Errorf("error is %d runes, want at most %d", got, max)
 		}
 	})
@@ -212,7 +212,7 @@ func TestStreamTranslator_ErrorEvent_ServerText(t *testing.T) {
 		if err == nil {
 			t.Fatal("process() err = nil, want the stream error")
 		}
-		if got, max := utf8.RuneCountInString(err.Error()), openaicommon.MaxServerTextRunes+64; got > max {
+		if got, max := utf8.RuneCountInString(err.Error()), shared.MaxServerTextRunes+64; got > max {
 			t.Errorf("process() err is %d runes, want at most %d", got, max)
 		}
 	})
