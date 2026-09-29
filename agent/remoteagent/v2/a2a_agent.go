@@ -672,13 +672,14 @@ func cleanupRemoteTask(ctx context.Context, cfg A2AConfig, card *a2a.AgentCard, 
 	}
 
 	// WithoutCancel returns its own type, which is no longer an
-	// agent.InvocationContext; with Auth set, re-wrap so a credential provider
-	// can still recover the ADK context here, exactly as it can on the send
-	// path. Only with Auth set: a caller who never opted in keeps the plain
-	// context.WithoutCancel that RemoteTaskCleanupCallback's doc promises. That
-	// includes a custom ClientProvider's client, which is why NewA2A's error
-	// tells it to capture its scope when it is built rather than read it back
-	// from each call.
+	// agent.InvocationContext. With Auth set, re-wrap it for
+	// RemoteTaskCleanupCallback, whose doc promises that callback the ADK
+	// context and the scope. The CancelTask below needs no such help: the auth
+	// transport recovers the invocation from the context's values whatever
+	// type the context has. A caller who never opted in keeps the plain
+	// context.WithoutCancel, custom ClientProvider included, which is why
+	// NewA2A's error tells that provider to capture its scope when it builds
+	// the client.
 	detached := context.WithoutCancel(ctx)
 	if cfg.Auth != nil {
 		detached = reattachInvocation(ctx, detached)
@@ -695,11 +696,7 @@ func cleanupRemoteTask(ctx context.Context, cfg A2AConfig, card *a2a.AgentCard, 
 	}
 	cancelCtx, cancelTimeout := context.WithTimeout(ctx, cleanupTimeout)
 	defer cancelTimeout()
-	callCtx := context.Context(cancelCtx)
-	if cfg.Auth != nil {
-		callCtx = reattachInvocation(ctx, cancelCtx)
-	}
-	_, err := client.CancelTask(callCtx, &a2a.CancelTaskRequest{ID: taskID})
+	_, err := client.CancelTask(cancelCtx, &a2a.CancelTaskRequest{ID: taskID})
 	if err != nil {
 		log.Warn(ctx, "failed to cancel task", "task_id", taskID, "error", err)
 	}

@@ -572,6 +572,12 @@ func TestSameCredentialTarget(t *testing.T) {
 		{name: "scheme upgraded to https onto a different port", from: "http://h/rpc", to: "https://h:9443/rpc", want: false},
 		{name: "scheme downgraded with implicit ports", from: "https://h/rpc", to: "http://h/rpc", want: false},
 		{name: "unrelated scheme", from: "https://h/rpc", to: "ftp://h/rpc", want: false},
+		// Only http to https counts as an upgrade: either half alone is not one.
+		{name: "http to an unrelated scheme", from: "http://h/rpc", to: "ftp://h/rpc", want: false},
+		{name: "an unrelated scheme to https", from: "ftp://h/rpc", to: "https://h/rpc", want: false},
+		// An explicit default port on one side and an implicit one on the other
+		// is still each scheme's own default.
+		{name: "scheme upgraded to https, explicit http default to implicit", from: "http://h:80/rpc", to: "https://h/rpc", want: true},
 		{name: "scheme downgraded to http", from: "https://h/rpc", to: "http://h/rpc", want: false},
 		{name: "different host", from: "https://h/rpc", to: "https://other/rpc", want: false},
 		{name: "different port", from: "https://h:8443/rpc", to: "https://h:9443/rpc", want: false},
@@ -1848,16 +1854,17 @@ func TestRemoteAgent_AuthWarnsOnCleartextInterface(t *testing.T) {
 				t.Fatalf("NewA2A() error = %v", err)
 			}
 			warns := &countingHandler{match: "will be sent in cleartext"}
-			// Twice: a per-invocation warning would show up as two lines. The
-			// unreachable hosts make the run fail, which is not what is under
-			// test — the warning is emitted before the first request.
-			for range 2 {
+			// Three times. Two would not tell "warn the first time" from "warn
+			// every time but the first": both log once. The unreachable hosts
+			// make the run fail, which is not what is under test — the warning
+			// is emitted before the first request.
+			for range 3 {
 				ictx := newInvocationContext(t, []*session.Event{newUserHello()})
 				scoped := ictx.WithContext(log.AttachLogger(ictx, slog.New(warns)))
 				runAndCollect(scoped, remoteAgent) //nolint:errcheck // the unreachable hosts make the run fail; the warning is emitted before the first request
 			}
 			if got := warns.count.Load(); got != tc.wantWarn {
-				t.Errorf("cleartext warning logged %d times over 2 invocations, want %d", got, tc.wantWarn)
+				t.Errorf("cleartext warning logged %d times over 3 invocations, want %d", got, tc.wantWarn)
 			}
 		})
 	}
@@ -2511,5 +2518,69 @@ func TestAuthTransportKeysEachStepOnTheRequestScope(t *testing.T) {
 				t.Fatal("bob's request joined alice's in-flight step")
 			}
 		})
+	}
+}
+
+// TestAuthContextWithICDeltaWithoutContext covers a delta that replaces
+// something other than the context, and no delta at all. Both must keep the
+// wrapper's own context rather than dereferencing a context that is not there.
+func TestAuthContextWithICDeltaWithoutContext(t *testing.T) {
+	ictx := newInvocationContextFor(t, t.Name(), "hana", "default")
+	cfg := A2AConfig{Name: "a2a", Auth: auth.StaticToken("tok")}
+	sendCtx, ok := authSendContext(ictx, cfg, nil).(agent.InvocationContext)
+	if !ok {
+		t.Fatalf("authSendContext() = %T, want an agent.InvocationContext", sendCtx)
+	}
+	want := CredentialScope(ictx.Session(), cfg.Name)
+	for name, d := range map[string]*agent.InvocationContextDelta{
+		"delta without a context": {},
+		"nil delta":               nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := sendCtx.WithICDelta(d)
+			if sid, ok := a2aclient.SessionIDFrom(got); !ok || sid != want {
+				t.Errorf("SessionIDFrom(WithICDelta(...)) = %q, %v, want %q, true", sid, ok, want)
+			}
+		})
+	}
+}
+
+// closeRecorder is a request body that records whether it was closed.
+type closeRecorder struct {
+	io.Reader
+	closed atomic.Bool
+}
+
+func (c *closeRecorder) Close() error { c.closed.Store(true); return nil }
+
+// TestAuthTransportClosesTheBodyOnFailure pins the RoundTripper contract on the
+// paths that return before the base transport takes the request: the body is
+// ours to close there, and leaving it open leaks it.
+func TestAuthTransportClosesTheBodyOnFailure(t *testing.T) {
+	tr := &authTransport{
+		provider: auth.ProviderFunc(func(context.Context) (auth.Credential, error) { return nil, errResolve }),
+		mints:    newMintGroup(),
+		applies:  newApplyGroup(),
+		base:     http.DefaultTransport,
+	}
+	body := &closeRecorder{Reader: strings.NewReader("{}")}
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "http://example.invalid", body)
+	if err != nil {
+		t.Fatalf("http.NewRequest() error = %v", err)
+	}
+	if _, err := tr.RoundTrip(req); !errors.Is(err, errResolve) {
+		t.Fatalf("RoundTrip() error = %v, want it to wrap %v", err, errResolve)
+	}
+	if !body.closed.Load() {
+		t.Error("RoundTrip() returned early without closing the request body")
+	}
+
+	// A request with no body must not trip over the missing one either.
+	req, err = http.NewRequestWithContext(t.Context(), http.MethodGet, "http://example.invalid", nil)
+	if err != nil {
+		t.Fatalf("http.NewRequest() error = %v", err)
+	}
+	if _, err := tr.RoundTrip(req); !errors.Is(err, errResolve) {
+		t.Errorf("RoundTrip() error = %v, want it to wrap %v", err, errResolve)
 	}
 }
