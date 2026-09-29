@@ -40,23 +40,23 @@ func NormalizeSchema(schema any) (map[string]any, error) {
 	if err := decoder.Decode(&result); err != nil {
 		return nil, fmt.Errorf("openai: unmarshal json schema: %w", err)
 	}
-	PreserveSchemaNumbers(result)
+	preserveSchemaNumbers(result)
 	return result, nil
 }
 
-// PreserveSchemaNumbers keeps numeric constraints as raw JSON. The OpenAI SDK
+// preserveSchemaNumbers keeps numeric constraints as raw JSON. The OpenAI SDK
 // otherwise serializes json.Number values as strings.
-func PreserveSchemaNumbers(val any) any {
+func preserveSchemaNumbers(val any) any {
 	switch v := val.(type) {
 	case json.Number:
 		return json.RawMessage(v.String())
 	case map[string]any:
 		for key, child := range v {
-			v[key] = PreserveSchemaNumbers(child)
+			v[key] = preserveSchemaNumbers(child)
 		}
 	case []any:
 		for i, child := range v {
-			v[i] = PreserveSchemaNumbers(child)
+			v[i] = preserveSchemaNumbers(child)
 		}
 	}
 	return val
@@ -153,13 +153,13 @@ func SchemaToMap(schema *genai.Schema) (map[string]any, error) {
 	if err := json.Unmarshal(bytes, &result); err != nil {
 		return nil, fmt.Errorf("openai: unmarshal schema: %w", err)
 	}
-	LowercaseSchemaTypes(result)
+	lowercaseSchemaTypes(result)
 	return result, nil
 }
 
-// LowercaseSchemaTypes rewrites genai's upper-case type names, at every depth
+// lowercaseSchemaTypes rewrites genai's upper-case type names, at every depth
 // of a decoded schema, to the lower case JSON Schema uses.
-func LowercaseSchemaTypes(val any) {
+func lowercaseSchemaTypes(val any) {
 	switch v := val.(type) {
 	case map[string]any:
 		if t, ok := v["type"]; ok {
@@ -175,11 +175,11 @@ func LowercaseSchemaTypes(val any) {
 			}
 		}
 		for _, child := range v {
-			LowercaseSchemaTypes(child)
+			lowercaseSchemaTypes(child)
 		}
 	case []any:
 		for _, child := range v {
-			LowercaseSchemaTypes(child)
+			lowercaseSchemaTypes(child)
 		}
 	}
 }
