@@ -29,10 +29,10 @@ import (
 	"google.golang.org/adk/v2/model/openaimodel/internal/shared"
 )
 
-// chatWire marshals the params the way the SDK sends them, so assertions read
+// requestWire marshals the params the way the SDK sends them, so assertions read
 // the bytes rather than the Go structs. omitzero and union arms are where this
 // package's defects live.
-func chatWire(t *testing.T, req *model.LLMRequest) map[string]any {
+func requestWire(t *testing.T, req *model.LLMRequest) map[string]any {
 	t.Helper()
 	params, err := buildParams("gpt-4o-mini", req)
 	if err != nil {
@@ -49,7 +49,7 @@ func chatWire(t *testing.T, req *model.LLMRequest) map[string]any {
 	return out
 }
 
-func chatMessages(t *testing.T, wire map[string]any) []map[string]any {
+func wireMessages(t *testing.T, wire map[string]any) []map[string]any {
 	t.Helper()
 	raw, ok := wire["messages"].([]any)
 	if !ok {
@@ -84,10 +84,10 @@ func TestBuildParams_Roles(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			wire := chatWire(t, &model.LLMRequest{Contents: []*genai.Content{
+			wire := requestWire(t, &model.LLMRequest{Contents: []*genai.Content{
 				{Role: tt.role, Parts: []*genai.Part{{Text: "hi"}}},
 			}})
-			msgs := chatMessages(t, wire)
+			msgs := wireMessages(t, wire)
 			if len(msgs) != 1 {
 				t.Fatalf("messages = %d, want 1", len(msgs))
 			}
@@ -111,13 +111,13 @@ func TestBuildParams_UnsupportedRole(t *testing.T) {
 }
 
 func TestBuildParams_SystemInstructionLeadsMessages(t *testing.T) {
-	wire := chatWire(t, &model.LLMRequest{
+	wire := requestWire(t, &model.LLMRequest{
 		Contents: []*genai.Content{{Role: "user", Parts: []*genai.Part{{Text: "hi"}}}},
 		Config: &genai.GenerateContentConfig{
 			SystemInstruction: genai.NewContentFromText("be terse", genai.RoleUser),
 		},
 	})
-	msgs := chatMessages(t, wire)
+	msgs := wireMessages(t, wire)
 	if len(msgs) != 2 {
 		t.Fatalf("messages = %d, want 2", len(msgs))
 	}
@@ -133,12 +133,12 @@ func TestBuildParams_SystemInstructionLeadsMessages(t *testing.T) {
 }
 
 func TestBuildParams_MultiTurnHistory(t *testing.T) {
-	wire := chatWire(t, &model.LLMRequest{Contents: []*genai.Content{
+	wire := requestWire(t, &model.LLMRequest{Contents: []*genai.Content{
 		{Role: "user", Parts: []*genai.Part{{Text: "my locker is 8123"}}},
 		{Role: "model", Parts: []*genai.Part{{Text: "noted"}}},
 		{Role: "user", Parts: []*genai.Part{{Text: "which locker?"}}},
 	}})
-	msgs := chatMessages(t, wire)
+	msgs := wireMessages(t, wire)
 	if len(msgs) != 3 {
 		t.Fatalf("messages = %d, want 3", len(msgs))
 	}
@@ -156,15 +156,15 @@ func TestBuildParams_MultiTurnHistory(t *testing.T) {
 }
 
 func TestBuildParams_TextPartsJoin(t *testing.T) {
-	wire := chatWire(t, userReq(&genai.Part{Text: "one"}, &genai.Part{Text: "  "}, &genai.Part{Text: "two"}))
-	msgs := chatMessages(t, wire)
+	wire := requestWire(t, userReq(&genai.Part{Text: "one"}, &genai.Part{Text: "  "}, &genai.Part{Text: "two"}))
+	msgs := wireMessages(t, wire)
 	if got := msgs[0]["content"]; got != "one\ntwo" {
 		t.Errorf("content = %q, want %q; whitespace-only parts are dropped", got, "one\ntwo")
 	}
 }
 
 func TestBuildParams_ToolCallAndResultPairing(t *testing.T) {
-	wire := chatWire(t, &model.LLMRequest{Contents: []*genai.Content{
+	wire := requestWire(t, &model.LLMRequest{Contents: []*genai.Content{
 		{Role: "user", Parts: []*genai.Part{{Text: "weather?"}}},
 		{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
 			ID: "call_1", Name: "get_weather", Args: map[string]any{"city": "Lisbon"},
@@ -173,7 +173,7 @@ func TestBuildParams_ToolCallAndResultPairing(t *testing.T) {
 			ID: "call_1", Name: "get_weather", Response: map[string]any{"c": -7},
 		}}}},
 	}})
-	msgs := chatMessages(t, wire)
+	msgs := wireMessages(t, wire)
 	if len(msgs) != 3 {
 		t.Fatalf("messages = %d, want 3", len(msgs))
 	}
@@ -205,11 +205,11 @@ func TestBuildParams_ToolCallAndResultPairing(t *testing.T) {
 }
 
 func TestBuildParams_ToolResultWithoutCallID(t *testing.T) {
-	wire := chatWire(t, &model.LLMRequest{Contents: []*genai.Content{
+	wire := requestWire(t, &model.LLMRequest{Contents: []*genai.Content{
 		{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{Name: "f"}}}},
 		{Role: "user", Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{Name: "f"}}}},
 	}})
-	msgs := chatMessages(t, wire)
+	msgs := wireMessages(t, wire)
 	calls := msgs[0]["tool_calls"].([]any)
 	minted := calls[0].(map[string]any)["id"]
 	if minted == "" {
@@ -234,13 +234,13 @@ func TestBuildParams_UnknownToolResultIDRejected(t *testing.T) {
 // TestBuildParams_ThoughtsNotReplayed pins that prior-turn reasoning is
 // dropped rather than sent back as assistant text, as on the Responses path.
 func TestBuildParams_ThoughtsNotReplayed(t *testing.T) {
-	wire := chatWire(t, &model.LLMRequest{Contents: []*genai.Content{
+	wire := requestWire(t, &model.LLMRequest{Contents: []*genai.Content{
 		{Role: "model", Parts: []*genai.Part{
 			{Text: "the user wants a joke", Thought: true},
 			{Text: "here it is"},
 		}},
 	}})
-	msgs := chatMessages(t, wire)
+	msgs := wireMessages(t, wire)
 	if len(msgs) != 1 {
 		t.Fatalf("messages = %d, want 1", len(msgs))
 	}
@@ -329,7 +329,7 @@ func TestBuildParams_PartFieldsReadIndependently(t *testing.T) {
 		{name: "signed call", part: &genai.Part{FunctionCall: call, ThoughtSignature: []byte("sig")}, wantContent: nil},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			msgs := chatMessages(t, chatWire(t, &model.LLMRequest{Contents: []*genai.Content{
+			msgs := wireMessages(t, requestWire(t, &model.LLMRequest{Contents: []*genai.Content{
 				{Role: "model", Parts: []*genai.Part{tt.part}},
 				result,
 			}}))
@@ -367,7 +367,7 @@ func TestBuildParams_SignatureOnlyPartDropped(t *testing.T) {
 		{name: "alone", parts: []*genai.Part{{ThoughtSignature: []byte("sig")}}, want: []string{"user"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			msgs := chatMessages(t, chatWire(t, &model.LLMRequest{Contents: []*genai.Content{
+			msgs := wireMessages(t, requestWire(t, &model.LLMRequest{Contents: []*genai.Content{
 				{Role: "user", Parts: []*genai.Part{{Text: "weather?"}}},
 				{Role: "model", Parts: tt.parts},
 			}}))
@@ -404,7 +404,7 @@ func TestApplyGenerationConfig_EndpointOnlyFields(t *testing.T) {
 	seed := int32(42)
 	freq := float32(0.5)
 	pres := float32(-0.25)
-	wire := chatWire(t, &model.LLMRequest{
+	wire := requestWire(t, &model.LLMRequest{
 		Contents: []*genai.Content{{Role: "user", Parts: []*genai.Part{{Text: "hi"}}}},
 		Config: &genai.GenerateContentConfig{
 			StopSequences:    []string{"STOP", "END"},
@@ -432,7 +432,7 @@ func TestApplyGenerationConfig_TranslatedFields(t *testing.T) {
 	temp := float32(0.3)
 	topP := float32(0.9)
 	logprobs := int32(3)
-	wire := chatWire(t, &model.LLMRequest{
+	wire := requestWire(t, &model.LLMRequest{
 		Contents: []*genai.Content{{Role: "user", Parts: []*genai.Part{{Text: "hi"}}}},
 		Config: &genai.GenerateContentConfig{
 			Temperature:      &temp,
@@ -508,7 +508,7 @@ func TestApplyGenerationConfig_SeedAccepted(t *testing.T) {
 
 func TestApplyGenerationConfig_ResponseFormat(t *testing.T) {
 	t.Run("json object without a schema", func(t *testing.T) {
-		wire := chatWire(t, &model.LLMRequest{
+		wire := requestWire(t, &model.LLMRequest{
 			Contents: []*genai.Content{{Role: "user", Parts: []*genai.Part{{Text: "hi"}}}},
 			Config:   &genai.GenerateContentConfig{ResponseMIMEType: "application/json"},
 		})
@@ -522,7 +522,7 @@ func TestApplyGenerationConfig_ResponseFormat(t *testing.T) {
 	})
 
 	t.Run("json schema", func(t *testing.T) {
-		wire := chatWire(t, &model.LLMRequest{
+		wire := requestWire(t, &model.LLMRequest{
 			Contents: []*genai.Content{{Role: "user", Parts: []*genai.Part{{Text: "hi"}}}},
 			Config: &genai.GenerateContentConfig{ResponseSchema: &genai.Schema{
 				Title: "answer",
@@ -547,7 +547,7 @@ func TestApplyGenerationConfig_ResponseFormat(t *testing.T) {
 	})
 
 	t.Run("response json schema", func(t *testing.T) {
-		wire := chatWire(t, &model.LLMRequest{
+		wire := requestWire(t, &model.LLMRequest{
 			Contents: []*genai.Content{{Role: "user", Parts: []*genai.Part{{Text: "hi"}}}},
 			Config: &genai.GenerateContentConfig{ResponseJsonSchema: map[string]any{
 				"type":       "object",
@@ -591,7 +591,7 @@ func TestApplyThinkingConfig(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			wire := chatWire(t, &model.LLMRequest{
+			wire := requestWire(t, &model.LLMRequest{
 				Contents: []*genai.Content{{Role: "user", Parts: []*genai.Part{{Text: "hi"}}}},
 				Config:   &genai.GenerateContentConfig{ThinkingConfig: tt.cfg},
 			})
@@ -633,7 +633,7 @@ func TestApplyThinkingConfig_RejectsNonsenseBudget(t *testing.T) {
 // tool_calls array, so the interleaving has to flatten. What must not happen is
 // either half of the speech going missing.
 func TestBuildParams_InterleavedTextAndCall(t *testing.T) {
-	wire := chatWire(t, &model.LLMRequest{Contents: []*genai.Content{
+	wire := requestWire(t, &model.LLMRequest{Contents: []*genai.Content{
 		{Role: "model", Parts: []*genai.Part{
 			{Text: "thinking about it", Thought: true},
 			{Text: "let me check"},
@@ -644,7 +644,7 @@ func TestBuildParams_InterleavedTextAndCall(t *testing.T) {
 			ID: "call_1", Name: "get_weather", Response: map[string]any{"c": -7},
 		}}}},
 	}})
-	msgs := chatMessages(t, wire)
+	msgs := wireMessages(t, wire)
 	if len(msgs) != 2 {
 		t.Fatalf("messages = %d, want the assistant turn and its tool result", len(msgs))
 	}

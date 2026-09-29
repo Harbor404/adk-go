@@ -43,7 +43,7 @@ var weatherTool = &genai.Tool{FunctionDeclarations: []*genai.FunctionDeclaration
 // TestConvertTools_NestedFunctionShape pins the extra "function" level Chat
 // Completions requires and the flat Responses shape does not have.
 func TestConvertTools_NestedFunctionShape(t *testing.T) {
-	wire := chatWire(t, toolReq(&genai.GenerateContentConfig{Tools: []*genai.Tool{weatherTool}}))
+	wire := requestWire(t, toolReq(&genai.GenerateContentConfig{Tools: []*genai.Tool{weatherTool}}))
 	tools, ok := wire["tools"].([]any)
 	if !ok || len(tools) != 1 {
 		t.Fatalf("tools = %#v, want one", wire["tools"])
@@ -70,7 +70,7 @@ func TestConvertTools_NestedFunctionShape(t *testing.T) {
 }
 
 func TestConvertTools_NoParametersDefaultsToEmptyObject(t *testing.T) {
-	wire := chatWire(t, toolReq(&genai.GenerateContentConfig{Tools: []*genai.Tool{{
+	wire := requestWire(t, toolReq(&genai.GenerateContentConfig{Tools: []*genai.Tool{{
 		FunctionDeclarations: []*genai.FunctionDeclaration{{Name: "ping"}},
 	}}}))
 	fn := wire["tools"].([]any)[0].(map[string]any)["function"].(map[string]any)
@@ -84,7 +84,7 @@ func TestConvertTools_NoParametersDefaultsToEmptyObject(t *testing.T) {
 // emits, whose optional properties must stay optional: the strict rewrite that
 // response schemas get would list every property as required.
 func TestConvertTools_ParametersJsonSchema(t *testing.T) {
-	wire := chatWire(t, toolReq(&genai.GenerateContentConfig{Tools: []*genai.Tool{{
+	wire := requestWire(t, toolReq(&genai.GenerateContentConfig{Tools: []*genai.Tool{{
 		FunctionDeclarations: []*genai.FunctionDeclaration{{
 			Name: "get_weather",
 			ParametersJsonSchema: map[string]any{
@@ -134,7 +134,7 @@ func TestConvertToolChoice_Modes(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			wire := chatWire(t, toolReq(&genai.GenerateContentConfig{
+			wire := requestWire(t, toolReq(&genai.GenerateContentConfig{
 				Tools:      []*genai.Tool{weatherTool},
 				ToolConfig: &genai.ToolConfig{FunctionCallingConfig: &genai.FunctionCallingConfig{Mode: tt.mode}},
 			}))
@@ -175,7 +175,7 @@ func TestConvertToolChoice_AllowedTools(t *testing.T) {
 		{name: "any with several names", mode: genai.FunctionCallingConfigModeAny, names: []string{"get_weather", "get_time"}, wantMode: "required"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			wire := chatWire(t, toolReq(&genai.GenerateContentConfig{
+			wire := requestWire(t, toolReq(&genai.GenerateContentConfig{
 				Tools: []*genai.Tool{weatherTool},
 				ToolConfig: &genai.ToolConfig{FunctionCallingConfig: &genai.FunctionCallingConfig{
 					Mode:                 tt.mode,
@@ -211,7 +211,7 @@ func TestConvertToolChoice_AllowedTools(t *testing.T) {
 // named-function form for the one case it can express, which compatible
 // providers accept where many reject allowed_tools.
 func TestConvertToolChoice_AnyWithOneNameNamesTheFunction(t *testing.T) {
-	wire := chatWire(t, toolReq(&genai.GenerateContentConfig{
+	wire := requestWire(t, toolReq(&genai.GenerateContentConfig{
 		Tools: []*genai.Tool{weatherTool},
 		ToolConfig: &genai.ToolConfig{FunctionCallingConfig: &genai.FunctionCallingConfig{
 			Mode:                 genai.FunctionCallingConfigModeAny,
@@ -239,7 +239,7 @@ func TestBuildParams_ToolChoiceNeedsTools(t *testing.T) {
 		genai.FunctionCallingConfigModeAny,
 	} {
 		t.Run(string(mode), func(t *testing.T) {
-			wire := chatWire(t, toolReq(&genai.GenerateContentConfig{
+			wire := requestWire(t, toolReq(&genai.GenerateContentConfig{
 				ToolConfig: &genai.ToolConfig{FunctionCallingConfig: &genai.FunctionCallingConfig{Mode: mode}},
 			}))
 			if got, ok := wire["tool_choice"]; ok {
@@ -250,7 +250,7 @@ func TestBuildParams_ToolChoiceNeedsTools(t *testing.T) {
 }
 
 func TestConvertToolChoice_AllBlankNamesFallsBack(t *testing.T) {
-	wire := chatWire(t, toolReq(&genai.GenerateContentConfig{
+	wire := requestWire(t, toolReq(&genai.GenerateContentConfig{
 		Tools: []*genai.Tool{weatherTool},
 		ToolConfig: &genai.ToolConfig{FunctionCallingConfig: &genai.FunctionCallingConfig{
 			Mode:                 genai.FunctionCallingConfigModeAny,
