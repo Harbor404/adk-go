@@ -1,9 +1,9 @@
 # OpenAI Chat Completions
 
 Runs an ordinary ADK `llmagent`, with a tool, over OpenAI's **Chat Completions**
-API. That is the surface most OpenAI-compatible providers implement, so the same
-program reaches DeepSeek, Groq, Together, Fireworks, Mistral, OpenRouter and
-Ollama by changing two environment variables.
+API. That is the surface almost every OpenAI-compatible provider implements, so
+the same program reaches another provider by changing two environment
+variables.
 
 - **Concept:** `ClientConfig.API = openaimodel.APIChatCompletions` picks the endpoint; everything downstream is unchanged.
 - **Needs LLM?** Yes (OpenAI, or any provider speaking Chat Completions)
@@ -70,12 +70,13 @@ export OPENAI_API_KEY=sk-...
 go run ./examples/openai/completions console
 ```
 
-Against another provider, for example Groq:
+Against another OpenAI-compatible provider, with its key, endpoint and model
+name:
 
 ```bash
-export OPENAI_API_KEY="$GROQ_API_KEY"
-export OPENAI_BASE_URL=https://api.groq.com/openai/v1
-export OPENAI_MODEL=llama-3.3-70b-versatile
+export OPENAI_API_KEY="<provider API key>"
+export OPENAI_BASE_URL="<provider base URL>"
+export OPENAI_MODEL="<provider model name>"
 go run ./examples/openai/completions console
 ```
 

@@ -76,16 +76,15 @@
 //		log.Fatal(err)
 //	}
 //
-// Reaching a provider that speaks only Chat Completions is the same call with
-// two more fields:
+// Selecting the Chat Completions API is one more field:
 //
 //	cfg := &openaimodel.ClientConfig{
-//		APIKey:  os.Getenv("DEEPSEEK_API_KEY"),
-//		BaseURL: "https://api.deepseek.com/v1",
-//		API:     openaimodel.APIChatCompletions,
+//		APIKey: os.Getenv("OPENAI_API_KEY"),
+//		API:    openaimodel.APIChatCompletions,
 //	}
 //
-// Make sure APIKey is non-empty when BaseURL points at another provider. The
-// OpenAI client falls back to the OPENAI_API_KEY environment variable when it
-// is empty, and would send that key to BaseURL.
+// Setting BaseURL points either API at another OpenAI-compatible provider that
+// serves it. Make sure APIKey is non-empty when BaseURL points at another
+// provider. The OpenAI client falls back to the OPENAI_API_KEY environment
+// variable when it is empty, and would send that key to BaseURL.
 package openaimodel
