@@ -47,21 +47,21 @@ type dynamicSubScheduler struct {
 	// childPath ("<parentPath>/<name>@<runID>"). Failures and HITL
 	// interrupts are not cached.
 	resultByPath map[string]any
-	// inflightByPath holds the activation currently running for a
+	// inflightByPath holds the run currently in progress for a
 	// childPath, so concurrent callers with the same WithRunID share its
 	// outcome instead of running the child again.
 	inflightByPath map[string]*inflightRun
 	delegation     outputDelegation
 }
 
-// runResult is one activation's outcome, shared by every caller that
+// runResult is one child run's outcome, shared by every caller that
 // overlapped it. Exactly one of out and err is meaningful.
 type runResult struct {
 	out any
 	err error
 }
 
-// inflightRun is a childPath's running activation. The leader stores res
+// inflightRun is a childPath's run in progress. The leader stores res
 // and closes done; waiters read res only after done is closed, so the
 // close/receive pair carries the write.
 type inflightRun struct {
@@ -219,10 +219,9 @@ func (s *dynamicSubScheduler) rehydrateCache() {
 // the cache is effectively bypassed for them.
 //
 // Calls sharing a WithRunID are gated per childPath by awaitOrLead, so
-// overlapping callers share one activation's outcome instead of each
-// running the child. A caller must therefore not invoke RunNode for a
-// childPath its own frame already leads: it would wait on itself until
-// the invocation is cancelled.
+// overlapping callers share one run's outcome instead of each
+// running the child. A child re-entering its own childPath therefore
+// waits on itself; see WithRunID for the caller-facing rule.
 //
 // Session, invocation metadata, and cancellation come from
 // s.parentCtx. opts carries the resolved RunNodeOption arguments.
@@ -285,7 +284,7 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 	defer func() { span.recordError(err, rawErr) }()
 
 	// The child already ran (WithRunID replay), or another caller is
-	// running it right now and we shared its outcome. Either way, publish
+	// running it right now and we shared its outcome. On success, publish
 	// the output for the delegation immediately. The span opened above
 	// still records the hit.
 	if res, hasResult := s.awaitOrLead(childPath); hasResult {
@@ -296,10 +295,11 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 		return res.out, nil
 	}
 	// This caller leads: hand the outcome to every waiter, on every exit
-	// path, so the child runs at most once per activation. completed is
+	// path, so overlapping callers never start a second run. completed is
 	// set at the single success return below; a panic or runtime.Goexit
 	// unwinds past it leaving err nil, which would otherwise publish and
-	// cache that non-completion as a successful nil output.
+	// cache that non-completion as a success carrying whatever output the
+	// child had emitted before it stopped.
 	var completed bool
 	defer func() {
 		res := runResult{out: out, err: err}
@@ -462,18 +462,18 @@ func waitsForOutput(node Node) bool {
 	return w != nil && *w
 }
 
-// awaitOrLead reports the outcome of childPath's activation when one is
+// awaitOrLead reports the outcome of childPath's run when one is
 // already available, and otherwise makes this caller the leader, which
 // must run the child and publish the outcome via finishRun.
 //
 // A caller arriving while a leader runs blocks until the leader publishes
 // and then shares that outcome — including a failure or a HITL interrupt
-// — instead of running the child again. So a childPath executes at most
-// once per activation on every path, not just the successful one.
+// — instead of running the child again. So overlapping callers never
+// start a second run, whatever the outcome, not just on success.
 // Mirrors adk-python's _check_existing_run, which awaits the in-flight
 // task and hands every concurrent caller the same result.
 //
-// Sharing is confined to callers that overlap one activation: nothing is
+// Sharing is confined to callers that overlap one run: nothing is
 // cached for a failure or an interrupt, so a later sequential call finds
 // no entry and re-runs the child, as before.
 //

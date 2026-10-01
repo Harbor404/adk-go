@@ -400,7 +400,7 @@ func TestRunNode_WithRunID_IdempotentReplay(t *testing.T) {
 
 // gatedRunCountNode counts Run invocations and blocks until release is
 // closed, so a test can hold the leader inside Run while another caller
-// reaches the single-flight gate. outErr fails the activation; out, when
+// reaches the single-flight gate. outErr fails the run; out, when
 // non-nil, is emitted as the child's output.
 type gatedRunCountNode struct {
 	BaseNode
@@ -587,7 +587,7 @@ func TestRunNode_WithRunID_ConcurrentSharesFailure(t *testing.T) {
 }
 
 // TestRunNode_WithRunID_SequentialRerunAfterFailure: sharing is scoped to
-// one activation. A failure is not cached, so a later sequential call with
+// one run. A failure is not cached, so a later sequential call with
 // the same WithRunID runs the child again.
 func TestRunNode_WithRunID_SequentialRerunAfterFailure(t *testing.T) {
 	child := &gatedRunCountNode{
@@ -739,9 +739,9 @@ func TestRunNode_WithRunID_PanicNotCachedAsSuccess(t *testing.T) {
 }
 
 // TestRunNode_WithRunID_ConcurrentSharesPanicAsFailure: a caller waiting
-// on a leader whose child panics is handed a failure, not the leader's
-// zero-valued return. Without a guard the waiter reads the unset named
-// results and reports success with a nil output.
+// on a leader whose child panics is handed a failure. Without the guard
+// it receives the leader's named results as they stood when the panic
+// hit, and reports success with the partial output.
 func TestRunNode_WithRunID_ConcurrentSharesPanicAsFailure(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		child := &gatedPanicNode{
@@ -1089,9 +1089,10 @@ func TestRunNode_ConcurrentChildren_NoRace(t *testing.T) {
 			var wg sync.WaitGroup
 			wg.Add(n)
 			for i := 0; i < n; i++ {
-				// Distinct child + run-id per goroutine so the only shared
-				// mutable state is the parent yield path; a shared run-id
-				// would instead exercise the idempotency-cache race.
+				// Distinct run-id per goroutine so every child actually
+				// runs and the only shared mutable state is the parent
+				// yield path; a shared run-id would collapse the goroutines
+				// into one execution.
 				child := newStubNode("child", "out")
 				go func(i int) {
 					defer wg.Done()
