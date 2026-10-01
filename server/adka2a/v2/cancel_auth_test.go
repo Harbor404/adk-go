@@ -62,9 +62,10 @@ func (cancelOnlyExecutor) Cleanup(context.Context, *a2asrv.ExecutorContext, a2a.
 
 // scopedTransport stands in for the transport remoteagent.NewA2A installs for
 // A2AConfig.Auth, which this package cannot build because of the import cycle.
-// Like the real one it reads the credential scope from the request's context,
-// so it applies the credential only if the executor attached the scope and the
-// A2A client carried it down to the HTTP request.
+// It reads the credential scope from the request's context, as the real one
+// does to key its credential, but it is stricter: it applies the credential
+// only if the executor attached the scope and the A2A client carried it down to
+// the HTTP request, which is what makes it a test of that propagation.
 type scopedTransport struct {
 	scope a2aclient.SessionID
 	token string

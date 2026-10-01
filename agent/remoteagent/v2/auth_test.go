@@ -59,8 +59,9 @@ func (f tokenSourceFunc) Token() (*oauth2.Token, error) { return f() }
 
 // TestCredentialScope pins the documented key format with literal strings. The
 // end-to-end tests can only show that two identities differ, which every
-// weaker scope also satisfies; only this one rejects dropping a part or the
-// percent-encoding that keeps "/" from being ambiguous.
+// weaker scope also satisfies. Several tests pin the four parts against a
+// literal, but only this one rejects dropping the percent-encoding that keeps
+// "/" from being ambiguous.
 func TestCredentialScope(t *testing.T) {
 	tests := []struct {
 		name                                string
@@ -552,10 +553,10 @@ func TestRemoteAgent_AuthRefusesCrossOriginRedirect(t *testing.T) {
 	}
 }
 
-// TestSameCredentialTarget covers which redirects may carry the credential.
-// The refusal test below only exercises the cross-origin case, so without this
-// inverting the predicate would keep the suite green while breaking every
-// same-origin redirect.
+// TestSameCredentialTarget covers which redirects may carry the credential,
+// across the scheme and port combinations the end-to-end redirect tests above
+// do not reach: an upgrade to https, default ports written out or left
+// implicit, and schemes that are neither http nor https.
 func TestSameCredentialTarget(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -628,8 +629,9 @@ func TestAuthHTTPClientRedirectCap(t *testing.T) {
 
 // TestAuthHTTPClientTimeout pins the request timeout against a literal.
 // Supplying an explicit http.Client suppresses the one a2aclient would
-// otherwise install, so this field is the only thing bounding a request for
-// every Auth user, and nothing else in the suite touches it.
+// otherwise install, so this field is the only thing bounding the message send
+// for every Auth user — the cleanup CancelTask has its own 5s budget and the
+// card fetch its own client — and nothing else in the suite touches it.
 func TestAuthHTTPClientTimeout(t *testing.T) {
 	if got := authHTTPClient(auth.StaticToken("tok")).Timeout; got != 3*time.Minute {
 		t.Errorf("authHTTPClient().Timeout = %v, want %v", got, 3*time.Minute)
@@ -773,10 +775,10 @@ func TestRemoteAgent_AuthPreservesCallerScope(t *testing.T) {
 }
 
 // TestRemoteAgent_AuthCleanupReusesTheInvocationCredential pins that the cleanup
-// CancelTask carries the credential the invocation already resolved rather than
+// CancelTask carries the credential the send already resolved rather than
 // resolving a new one, as adk-python resolves once per invocation. The provider
-// also insists on the type assertion the Auth doc invites, so a provider that
-// relies on it keeps working.
+// is called once, for the send, so its type assertion says nothing about the
+// cleanup context — only that the send's context is an invocation.
 func TestRemoteAgent_AuthCleanupReusesTheInvocationCredential(t *testing.T) {
 	executor := &mockA2AExecutor{
 		executeFn: func(ctx context.Context, reqCtx *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
@@ -809,8 +811,9 @@ func TestRemoteAgent_AuthCleanupReusesTheInvocationCredential(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	// Resolves from the ADK context rather than the scope, so it fails outright
-	// if the cleanup context is no longer an agent.InvocationContext.
+	// Resolves from the ADK context rather than the scope, so the token names
+	// the invocation's user, and a cleanup that resolved its own credential
+	// would show up in the call count.
 	var calls atomic.Int32
 	perUser := auth.ProviderFunc(func(ctx context.Context) (auth.Credential, error) {
 		calls.Add(1)
@@ -866,11 +869,9 @@ func TestRedactTokenError(t *testing.T) {
 		{
 			name: "well-formed error response names a code", errorCode: "invalid_grant",
 			description: "assertion=eyJhbGciOi-SECRET", uri: "https://idp.invalid/errors/1",
-			wantKeep: []string{"invalid_grant", "https://idp.invalid/errors/1"},
-			// Dropped with the body it was parsed out of. The endpoint this
-			// redaction exists for puts the client's own signed assertion in
-			// error_description.
-			wantGone: []string{"assertion=eyJhbGciOi-SECRET"},
+			wantKeep: []string{"invalid_grant"},
+			// Free text parsed out of the body, dropped with it.
+			wantGone: []string{"assertion=eyJhbGciOi-SECRET", "https://idp.invalid/errors/1"},
 		},
 	}
 	for _, tc := range tests {
@@ -1362,9 +1363,11 @@ func jsonRPCMethod(r *http.Request) string {
 // TestNewA2AOwnsAuthScope pins the one line joining the user-facing Auth field
 // to the server-side cancel path. server/adka2a/v2 reads OwnsAuthScope to
 // decide whether to scope the cancel it issues for an abandoned child task, and
-// it cannot call NewA2A to check the derivation — the import would cycle — so
-// nothing else asserts it. If it stopped tracking Auth, every Auth user's
-// adka2a-issued cancel would go out unauthenticated.
+// neither that package nor its in-package tests can call NewA2A — the import
+// would cycle — so nothing else asserts the derivation. If it stopped tracking
+// Auth, every Auth user's adka2a-issued cancel would be resolved with no
+// identity: a provider keyed on the scope fails it, so the child task is left
+// running, and a card fetched for it goes out unauthenticated.
 func TestNewA2AOwnsAuthScope(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -1479,9 +1482,10 @@ func TestMintGroupSingleFlight(t *testing.T) {
 // reaches another. The two mints must overlap: a second call made after the
 // first has finished finds no entry whatever the map is keyed on, so a
 // sequential version of this test passes under a key that merges identities.
-// The scopes are real ones that share their app, session and agent segments,
-// so a key that merged on any prefix, or dropped any one part, would also be
-// caught — two single-segment keys have nothing in common to merge on.
+// The scopes are real ones, each differing from the first in exactly one
+// segment — user, session or agent — so a key that merged on any prefix, or
+// dropped any one part, would also be caught. Two single-segment keys have
+// nothing in common to merge on.
 func TestMintGroupSeparatesScopes(t *testing.T) {
 	scopes := []a2aclient.SessionID{
 		iremoteagent.CredentialScope("shop", "alice", "s1", "crm"),
@@ -1618,11 +1622,10 @@ func TestIsTypedNil(t *testing.T) {
 	}
 }
 
-// TestRemoteAgent_CleanupContextTypeTracksAuth pins that the cleanup context is
-// re-wrapped only when Auth is set. The wrapper exists so a credential provider
-// can still recover the ADK context there; with Auth unset nothing reads it
-// back, and RemoteTaskCleanupCallback's doc promises the plain
-// context.WithoutCancel a caller had before this field existed.
+// TestRemoteAgent_CleanupContextTypeTracksAuth pins what RemoteTaskCleanupCallback
+// receives. With Auth set its doc promises the invocation context and the
+// scope. With Auth unset it promises the plain context.WithoutCancel a caller
+// had before this field existed.
 func TestRemoteAgent_CleanupContextTypeTracksAuth(t *testing.T) {
 	tests := []struct {
 		name string
@@ -1873,7 +1876,7 @@ func TestRemoteAgent_AuthWarnsOnCleartextInterface(t *testing.T) {
 // TestMintGroupJoinerWaitsTheAttemptsRemainder pins that the bound belongs to
 // the attempt, not the waiter. Arming a fresh mintTimeout per arrival is what
 // makes a stuck token endpoint cost every request its own full budget, which is
-// the trade auth/gcp's provider records having already made.
+// the alternative auth/gcp's provider records having rejected.
 func TestMintGroupJoinerWaitsTheAttemptsRemainder(t *testing.T) {
 	prev := mintTimeout
 	mintTimeout = 2 * time.Second
@@ -1917,7 +1920,7 @@ func TestMintGroupJoinerWaitsTheAttemptsRemainder(t *testing.T) {
 // TestMintGroupRetiredAttemptDoesNotEvictItsSuccessor pins the conditional
 // delete. A mint that ran past its deadline has already been retired and a
 // successor may hold the entry, so an unconditional delete would drop the live
-// one and send every later request off to mint again.
+// one: the next request would start yet another mint instead of joining it.
 func TestMintGroupRetiredAttemptDoesNotEvictItsSuccessor(t *testing.T) {
 	prev := mintTimeout
 	mintTimeout = 40 * time.Millisecond
@@ -2123,9 +2126,10 @@ func TestRemoteAgent_AuthFailsClosed(t *testing.T) {
 }
 
 // TestRemoteAgent_AuthCoversTheCardFetchOnce pins two adk-python behaviors
-// together, because the second is only observable through the first: the
-// agent card fetch carries the credential, and the credential is resolved once
-// per invocation and reused for every call that invocation makes.
+// together: the agent card fetch carries the credential, and the credential is
+// resolved once per invocation and reused across its calls — here the fetch and
+// the send. TestRemoteAgent_AuthCleanupReusesTheInvocationCredential shows the
+// reuse on the cleanup cancel too.
 func TestRemoteAgent_AuthCoversTheCardFetchOnce(t *testing.T) {
 	var mu sync.Mutex
 	authByPath := map[string]string{}
@@ -2457,10 +2461,11 @@ func TestAuthTransportBoundsAWrappedOAuth2Credential(t *testing.T) {
 
 // TestAuthTransportKeysEachStepOnTheRequestScope pins that apply hands the
 // request's own scope to both single-flight groups. The groups are tested
-// directly elsewhere, but only this shows the transport feeds them the right
-// key: keyed on anything shared, bob's request would join alice's in-flight
-// step and go out with her token. Both the mint and the Apply path are driven,
-// with the two identities overlapping.
+// directly elsewhere, and this drives both the mint and the Apply path through
+// the transport with two identities overlapping: keyed on anything shared,
+// bob's request would join alice's in-flight step and go out with her token.
+// TestRemoteAgent_AuthConcurrentInvocations covers the Apply path end to end
+// too.
 func TestAuthTransportKeysEachStepOnTheRequestScope(t *testing.T) {
 	alice := a2aclient.AttachSessionID(context.WithoutCancel(t.Context()), iremoteagent.CredentialScope("shop", "alice", "s1", "crm"))
 	bob := a2aclient.AttachSessionID(context.WithoutCancel(t.Context()), iremoteagent.CredentialScope("shop", "bob", "s1", "crm"))
@@ -2532,9 +2537,10 @@ func TestAuthContextWithICDeltaWithoutContext(t *testing.T) {
 		t.Fatalf("authSendContext() = %T, want an agent.InvocationContext", sendCtx)
 	}
 	want := CredentialScope(ictx.Session(), cfg.Name)
+	branch := "other-branch"
 	for name, d := range map[string]*agent.InvocationContextDelta{
-		"delta without a context": {},
-		"nil delta":               nil,
+		"delta replacing only the branch": {Branch: &branch},
+		"nil delta":                       nil,
 	} {
 		t.Run(name, func(t *testing.T) {
 			got := sendCtx.WithICDelta(d)
@@ -2554,33 +2560,187 @@ type closeRecorder struct {
 func (c *closeRecorder) Close() error { c.closed.Store(true); return nil }
 
 // TestAuthTransportClosesTheBodyOnFailure pins the RoundTripper contract on the
-// paths that return before the base transport takes the request: the body is
-// ours to close there, and leaving it open leaks it.
+// two paths that return before the base transport takes the request — the
+// credential failing to resolve, and failing to apply. The body is ours to
+// close on both, and leaving it open leaks it.
 func TestAuthTransportClosesTheBodyOnFailure(t *testing.T) {
-	tr := &authTransport{
-		provider: auth.ProviderFunc(func(context.Context) (auth.Credential, error) { return nil, errResolve }),
-		mints:    newMintGroup(),
-		applies:  newApplyGroup(),
-		base:     http.DefaultTransport,
-	}
-	body := &closeRecorder{Reader: strings.NewReader("{}")}
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "http://example.invalid", body)
-	if err != nil {
-		t.Fatalf("http.NewRequest() error = %v", err)
-	}
-	if _, err := tr.RoundTrip(req); !errors.Is(err, errResolve) {
-		t.Fatalf("RoundTrip() error = %v, want it to wrap %v", err, errResolve)
-	}
-	if !body.closed.Load() {
-		t.Error("RoundTrip() returned early without closing the request body")
+	failResolve := auth.ProviderFunc(func(context.Context) (auth.Credential, error) { return nil, errResolve })
+	failApply := auth.ProviderFunc(func(context.Context) (auth.Credential, error) {
+		return applyFunc(func(http.Header) error { return errResolve }), nil
+	})
+	for name, provider := range map[string]auth.CredentialProvider{"resolve fails": failResolve, "apply fails": failApply} {
+		t.Run(name, func(t *testing.T) {
+			tr := &authTransport{provider: provider, mints: newMintGroup(), applies: newApplyGroup(), base: http.DefaultTransport}
+			body := &closeRecorder{Reader: strings.NewReader("{}")}
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "http://example.invalid", body)
+			if err != nil {
+				t.Fatalf("http.NewRequest() error = %v", err)
+			}
+			if _, err := tr.RoundTrip(req); !errors.Is(err, errResolve) {
+				t.Fatalf("RoundTrip() error = %v, want it to wrap %v", err, errResolve)
+			}
+			if !body.closed.Load() {
+				t.Error("RoundTrip() returned early without closing the request body")
+			}
+		})
 	}
 
+	tr := &authTransport{provider: failResolve, mints: newMintGroup(), applies: newApplyGroup(), base: http.DefaultTransport}
+
 	// A request with no body must not trip over the missing one either.
-	req, err = http.NewRequestWithContext(t.Context(), http.MethodGet, "http://example.invalid", nil)
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://example.invalid", nil)
 	if err != nil {
 		t.Fatalf("http.NewRequest() error = %v", err)
 	}
 	if _, err := tr.RoundTrip(req); !errors.Is(err, errResolve) {
 		t.Errorf("RoundTrip() error = %v, want it to wrap %v", err, errResolve)
+	}
+}
+
+// TestAuthTransportSharesAStepWithinAScope pins the other half of the
+// single-flight: two requests for the same scope share one Apply step. Building
+// a fresh Apply group per request would bring back what the mintGroup doc says
+// the single-flight exists to stop — another parked goroutine for every request
+// that arrives while a token endpoint hangs. The OAuth2 twin below does the
+// same for the mint group.
+func TestAuthTransportSharesAStepWithinAScope(t *testing.T) {
+	scope := a2aclient.AttachSessionID(context.WithoutCancel(t.Context()), iremoteagent.CredentialScope("shop", "alice", "s1", "crm"))
+	var calls atomic.Int32
+	release, entered := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	cred := applyFunc(func(h http.Header) error {
+		calls.Add(1)
+		once.Do(func() { close(entered) })
+		<-release
+		h.Set("Authorization", "Bearer alice")
+		return nil
+	})
+	tr := &authTransport{mints: newMintGroup(), applies: newApplyGroup()}
+	first := make(chan error, 1)
+	go func() { first <- tr.apply(scope, cred, http.Header{}) }()
+	<-entered
+	sid, _ := a2aclient.SessionIDFrom(scope)
+	tr.applies.mu.Lock()
+	held := tr.applies.inFlight[sid]
+	tr.applies.mu.Unlock()
+	if held == nil {
+		t.Fatal("no step recorded in flight for the scope while its Apply is running; the transport is not using its shared group")
+	}
+
+	// The second request carries an already-cancelled context, so it returns
+	// as soon as it has joined or started a step, and the count below is read
+	// with no window in which it might still be starting one.
+	cancelled, cancel := context.WithCancel(scope)
+	cancel()
+	if err := tr.apply(cancelled, cred, http.Header{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("apply() error = %v, want %v from a request that joined the in-flight step", err, context.Canceled)
+	}
+	tr.applies.mu.Lock()
+	still, n := tr.applies.inFlight[sid], len(tr.applies.inFlight)
+	tr.applies.mu.Unlock()
+	if still != held || n != 1 {
+		t.Errorf("after a second request the group holds %d steps (same one: %v), want the first one only", n, still == held)
+	}
+	close(release)
+	if err := <-first; err != nil {
+		t.Fatalf("apply() error = %v", err)
+	}
+	if n := calls.Load(); n != 1 {
+		t.Errorf("Apply ran %d times for two overlapping requests on one scope, want 1", n)
+	}
+}
+
+// TestAuthTransportSharesAMintWithinAScope is the OAuth2 twin of the test above:
+// two requests for one scope share one mint through the transport's own group.
+func TestAuthTransportSharesAMintWithinAScope(t *testing.T) {
+	scope := a2aclient.AttachSessionID(context.WithoutCancel(t.Context()), iremoteagent.CredentialScope("shop", "alice", "s1", "crm"))
+	release, entered := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	cred := auth.OAuth2Credential{TokenSource: tokenSourceFunc(func() (*oauth2.Token, error) {
+		once.Do(func() { close(entered) })
+		<-release
+		return &oauth2.Token{AccessToken: "alice"}, nil
+	})}
+	tr := &authTransport{mints: newMintGroup(), applies: newApplyGroup()}
+	first := make(chan error, 1)
+	go func() { first <- tr.apply(scope, cred, http.Header{}) }()
+	<-entered
+	defer func() {
+		close(release)
+		<-first
+	}()
+
+	sid, _ := a2aclient.SessionIDFrom(scope)
+	tr.mints.mu.Lock()
+	held := tr.mints.inFlight[sid]
+	tr.mints.mu.Unlock()
+	if held == nil {
+		t.Fatal("no mint recorded in flight for the scope while it runs; the transport is not using its shared group")
+	}
+	cancelled, cancel := context.WithCancel(scope)
+	cancel()
+	if err := tr.apply(cancelled, cred, http.Header{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("apply() error = %v, want %v from a request that joined the in-flight mint", err, context.Canceled)
+	}
+	tr.mints.mu.Lock()
+	still, n := tr.mints.inFlight[sid], len(tr.mints.inFlight)
+	tr.mints.mu.Unlock()
+	if still != held || n != 1 {
+		t.Errorf("after a second request the group holds %d mints (same one: %v), want the first one only", n, still == held)
+	}
+}
+
+// TestRemoteAgent_AuthProviderSeesTheIdentity pins the contract the auth package
+// itself states: a provider that needs the acting user recovers it with
+// agent.IdentityFromContext, as auth/gcp's provider does. It has to work on
+// every call the transport makes for an invocation — the card fetch and the
+// send here — whatever the HTTP client did to the context on the way down.
+func TestRemoteAgent_AuthProviderSeesTheIdentity(t *testing.T) {
+	var srv *httptest.Server
+	mux := http.NewServeMux()
+	mux.Handle("/invoke", a2asrv.NewJSONRPCHandler(a2asrv.NewHandler(newA2AEventReplay(t,
+		[]a2a.Event{a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("ok"))}))))
+	mux.HandleFunc("/.well-known/agent-card.json", func(w http.ResponseWriter, _ *http.Request) {
+		card := &a2a.AgentCard{
+			SupportedInterfaces: []*a2a.AgentInterface{a2a.NewAgentInterface(srv.URL+"/invoke", a2a.TransportProtocolJSONRPC)},
+			Capabilities:        a2a.AgentCapabilities{Streaming: true},
+		}
+		if err := json.NewEncoder(w).Encode(card); err != nil {
+			t.Errorf("json.Encode(agentCard) error = %v", err)
+		}
+	})
+	var mu sync.Mutex
+	var gotAuth []string
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		gotAuth = append(gotAuth, r.Header.Get("Authorization"))
+		mu.Unlock()
+		mux.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+
+	provider := auth.ProviderFunc(func(ctx context.Context) (auth.Credential, error) {
+		id, ok := agent.IdentityFromContext(ctx)
+		if !ok {
+			return nil, fmt.Errorf("no identity on %T", ctx)
+		}
+		return auth.BearerCredential{Token: id.AppName + ":" + id.UserID + ":" + id.SessionID}, nil
+	})
+	remoteAgent, err := NewA2A(A2AConfig{Name: "a2a", AgentCardProvider: NewAgentCardProvider(srv.URL), Auth: provider})
+	if err != nil {
+		t.Fatalf("NewA2A() error = %v", err)
+	}
+	if _, err := runAndCollect(newInvocationContextFor(t, "shop", "ivy", "s3"), remoteAgent); err != nil {
+		t.Fatalf("agent.Run() error = %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(gotAuth) < 2 {
+		t.Fatalf("server saw %d requests, want the card fetch and the send", len(gotAuth))
+	}
+	for i, got := range gotAuth {
+		if want := "Bearer shop:ivy:s3"; got != want {
+			t.Errorf("request %d Authorization = %q, want %q", i, got, want)
+		}
 	}
 }

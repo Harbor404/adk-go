@@ -57,10 +57,11 @@ func CredentialScope(s session.Session, agentName string) a2aclient.SessionID {
 
 // authContext keeps a context an [agent.InvocationContext] while its
 // cancellation and values come from somewhere else. A plain context.WithValue
-// would hide the ADK context behind an opaque wrapper, and
-// [auth.CredentialProvider] promises a provider can recover that context to
-// learn who is acting — including from the deferred cleanup, whose context is
-// detached from the invocation and separately bounded.
+// would keep the values — agent.IdentityFromContext, which the
+// [auth.CredentialProvider] contract tells a provider to use, would still work
+// — but it would hide the invocation behind an opaque type, and the Auth doc
+// lets a provider type-assert its context, as RemoteTaskCleanupCallback's doc
+// lets that callback.
 type authContext struct {
 	// The embedded value answers the ADK accessors. Everything
 	// context.Context declares is overridden below to read from ctx.
@@ -134,9 +135,11 @@ func authSendContext(ctx agent.InvocationContext, cfg A2AConfig, client *http.Cl
 }
 
 // reattachInvocation re-wraps derived so it is still an
-// [agent.InvocationContext] when orig was one. context.WithoutCancel and
-// context.WithTimeout return their own types, which would otherwise break the
-// type assertion the Auth doc invites a provider to make.
+// [agent.InvocationContext] when orig was one. Its caller is the cleanup, whose
+// context.WithoutCancel returns its own type, and RemoteTaskCleanupCallback's
+// doc promises that callback the invocation context. The credential provider
+// does not depend on it: the auth transport recovers the invocation from the
+// context's values whatever type the context has.
 func reattachInvocation(orig, derived context.Context) context.Context {
 	ic, ok := orig.(agent.InvocationContext)
 	if !ok {
@@ -148,12 +151,14 @@ func reattachInvocation(orig, derived context.Context) context.Context {
 // authTransport applies the credential A2AConfig.Auth resolves to every request
 // the A2A client sends, and to the agent card fetch.
 //
-// The caller's credential decides where it goes, through its own Apply, not the
-// agent card: this matches adk-python, whose RemoteA2aAgent writes the header
-// its configured auth scheme names and never reads the card's security
-// section, and it matches mcptoolset.Config.Auth, which applies a credential
-// the same way through auth.Transport. So every credential type works, and a
-// card that declares no security still gets the credential.
+// The caller's credential decides where it goes, not the agent card: this
+// matches adk-python, whose RemoteA2aAgent writes the header its configured
+// auth scheme names and never reads the card's security section. Every
+// credential but a bare OAuth2 one writes itself through its own Apply, as
+// mcptoolset.Config.Auth applies a credential through auth.Transport. A bare
+// OAuth2 credential is minted here instead and sent as a bearer token, see
+// apply. So every credential type works, and a card that declares no security
+// still gets the credential.
 //
 // A credential that cannot be resolved or applied fails the request rather than
 // letting it go out unauthenticated. adk-python fails closed too, by pausing
@@ -348,9 +353,11 @@ func cardSendsInClear(card *a2a.AgentCard) []string {
 // auth package's own initTimeout, and is a var so tests need not wait it out.
 var mintTimeout = 30 * time.Second
 
-// mintGroup runs at most one blocking credential step per credential scope at a
-// time — an OAuth2 token mint, or a credential's own Apply — and hands the
-// result to everyone waiting on it.
+// mintGroup collapses concurrent requests for one credential scope onto a
+// single blocking credential step — an OAuth2 token mint, or a credential's own
+// Apply — and hands the result to everyone waiting on it. A second step for the
+// same scope starts only once the current attempt's deadline has passed, see
+// mintCall.
 //
 // The step has to run in its own goroutine, because [oauth2.TokenSource.Token]
 // takes no context and so cannot be interrupted, and a credential's Apply can
@@ -378,16 +385,15 @@ type mintGroup[T any] struct {
 // through a stuck step waits out what is left of it rather than arming a fresh
 // mintTimeout of its own. auth/gcp's provider bounds its waiters the same way.
 //
-// Past the deadline the two part ways. auth/gcp keeps a hung attempt and fails
-// later callers at once, because its lookup eventually returns and publishes,
-// and retiring it would park a new goroutine every initTimeout. This group
-// retires it and starts a new step, and so pays exactly that cost: while a
-// token endpoint hangs, one more goroutine per scope stays parked every
-// mintTimeout. The reason is that nothing here promises the step returns.
-// Token() takes no context, and the JWT and ADC sources post through
-// http.DefaultClient, which has no timeout, so a step that is kept could hold
-// its scope's entry for the life of the process and lock that identity out
-// even after the endpoint recovers.
+// Past the deadline the two pick opposite costs for the same problem: a step
+// that may never return. Token() takes no context, and the JWT and ADC sources
+// post through http.DefaultClient, which has no timeout. auth/gcp keeps its hung
+// attempt for the rest of the process and fails every later call, accepting a
+// permanent lockout so that it never starts uncancellable lookups on a timer —
+// its ErrClientUnavailable doc calls that the deliberate trade. This group
+// retires the attempt and starts a new step, accepting that while a token
+// endpoint hangs one more goroutine per scope stays parked every mintTimeout,
+// so that a hang never locks an identity out after the endpoint recovers.
 type mintCall[T any] struct {
 	done     chan struct{}
 	deadline time.Time
@@ -640,8 +646,8 @@ func (e *redactedError) Unwrap() error { return e.cause }
 
 // redactTokenError strips the token endpoint's verbatim response body from an
 // [oauth2.RetrieveError]. The error reaches the invocation's error event and
-// any log that records it, and what an identity provider echoes into a non-2xx
-// body is outside our control — some reflect the request back.
+// any log that records it, and what an identity provider writes into a non-2xx
+// body is outside our control.
 //
 // It never reads the wrapper's message to decide. Deciding from the inner
 // error's fields was the first thing tried and it fails: the token source
@@ -654,10 +660,12 @@ func (e *redactedError) Unwrap() error { return e.cause }
 // quotes or re-encodes it would slip past.
 //
 // So a response that carried a body always gets a message built here, out of
-// the status and the two short enumerable fields, and nothing is copied from
-// whatever the wrapper wrote. error_description is dropped with the body: it
-// is unbounded free text parsed out of that same body, and the endpoint this
-// exists for puts the client's own signed assertion in it. The full error
+// the status and the error code, and nothing is copied from whatever the
+// wrapper wrote. The code is parsed out of the same body, but the OAuth2 spec
+// defines it as a single short ASCII code from a registered set, such as
+// invalid_grant, and it is the one field a caller needs to tell an expired
+// grant from a misconfiguration. error_description
+// and error_uri are free text and are dropped with the body. The full error
 // stays reachable through the chain for a caller that wants it — only what
 // gets logged is rebuilt.
 func redactTokenError(err error) error {
@@ -668,9 +676,6 @@ func redactTokenError(err error) error {
 	msg := "oauth2: cannot fetch token: " + re.Response.Status + " (response body redacted)"
 	if re.ErrorCode != "" {
 		msg += ": " + strconv.Quote(re.ErrorCode)
-	}
-	if re.ErrorURI != "" {
-		msg += " " + strconv.Quote(re.ErrorURI)
 	}
 	return &redactedError{msg: msg, cause: err}
 }

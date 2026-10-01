@@ -352,8 +352,11 @@ type A2AConfig struct {
 	// When an adka2a server hosting this agent cancels an abandoned child task,
 	// it calls the provider with its own request context, which is not an
 	// agent.InvocationContext and carries no scope. Check the type assertion
-	// rather than making it unconditionally, and identify the caller from that
-	// request instead.
+	// rather than making it unconditionally. CredentialScope cannot be rebuilt
+	// there: nothing on that context carries the session id. What a provider
+	// can rely on is the authenticated caller, through
+	// a2asrv.CallContextFrom(ctx), and only when the server runs an
+	// authenticator. Without one, nothing on that call identifies the caller.
 	ClientProvider A2AClientProvider
 
 	// Auth, when set, resolves an end-user credential and applies it to every
@@ -363,8 +366,9 @@ type A2AConfig struct {
 	// by a provider of your own is not covered. It cannot be combined with a
 	// custom ClientProvider; set one or the other.
 	//
-	// The credential decides where it goes, through its own Apply, exactly as
-	// it does for the field of the same name on mcptoolset.Config. The agent
+	// The credential decides where it goes, through its own Apply, as it does
+	// for the field of the same name on mcptoolset.Config — a bare
+	// auth.OAuth2Credential excepted, which is minted here, see below. The agent
 	// card's security section is not consulted, so every auth.Credential works
 	// and a card that declares no security still gets the credential. This
 	// matches adk-python's RemoteA2aAgent, whose configured auth scheme decides
@@ -386,9 +390,9 @@ type A2AConfig struct {
 	// attacker-influenced card could point the credential at an endpoint it
 	// controls, and a card naming an http:// interface sends it in cleartext,
 	// which is logged once per interface. A redirect that leaves the card's
-	// scheme and host is refused, because the credential would follow it, and
-	// a card fetch that carries the credential must use https or a loopback
-	// host.
+	// host, or downgrades its scheme, is refused, because the credential would
+	// follow it, and a card fetch that carries the credential must use https
+	// or a loopback host.
 	//
 	// The provider is called once per invocation and its credential reused for
 	// every call that invocation makes, as adk-python caches it. It is called
@@ -397,9 +401,12 @@ type A2AConfig struct {
 	// scope neither crosses users nor sends one remote agent's token to
 	// another: a2aclient.SessionIDFrom(ctx) yields the app name, user id,
 	// session id and this agent's Name, each percent-encoded and joined with
-	// "/". ctx is also the agent.InvocationContext, and a provider may
-	// type-assert it, except on the cancel an adka2a server issues for an
-	// abandoned child task, where only the scope is present.
+	// "/". The acting user is also available the way the auth.CredentialProvider
+	// contract describes, through agent.IdentityFromContext, and ctx is the
+	// agent.InvocationContext, which a provider may type-assert. Both hold on
+	// every call made for an invocation. Neither holds on the cancel an adka2a
+	// server issues for an abandoned child task, where only the scope is
+	// present.
 	//
 	// The scope is only as trustworthy as the identity behind it. Behind an
 	// adka2a server the identity comes from the A2A call context, and with no

@@ -58,7 +58,7 @@ type A2AServerConfig struct {
 	ClientProvider A2AClientProvider
 	// OwnsAuthScope reports that this SDK installed the auth transport on
 	// ClientProvider, so it also owns the credential scope on every outgoing
-	// call. When false the caller wired their own auth and their scope
+	// call. When false — no Auth at all, or the caller wired their own — their scope
 	// is left alone. See [AttachAuthScope].
 	OwnsAuthScope bool
 	// CardFetchClient, when set, is the client that applies the remote agent's
