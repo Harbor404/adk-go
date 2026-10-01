@@ -90,6 +90,7 @@ func TestSchemaFinishReason(t *testing.T) {
 		})
 	}
 }
+
 func TestSchemaFinishReason_EveryGenaiValue(t *testing.T) {
 	all := []genai.FinishReason{
 		genai.FinishReasonUnspecified, genai.FinishReasonStop, genai.FinishReasonMaxTokens,
