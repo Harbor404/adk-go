@@ -79,9 +79,9 @@ func isFunctionCallEvent(event *session.Event, callID, agentName string) bool {
 }
 
 // collectRemoteFunctionCallIDs returns call IDs this remote peer itself emitted.
-// Function responses whose IDs are not in this
-// set must not be forwarded as A2A function responses — the peer has no
-// invocation to resume for a call it never made.
+// Function responses whose IDs are not in this set must not be forwarded as A2A
+// function responses — the peer has no invocation to resume for a call it never
+// made.
 // When agentName is empty, the author gate is skipped (same as isFunctionCallEvent),
 // so calls from any author — including coordinators — are collected.
 func collectRemoteFunctionCallIDs(events session.Events, agentName string) map[string]struct{} {
