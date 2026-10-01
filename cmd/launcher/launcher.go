@@ -63,4 +63,10 @@ type Config struct {
 	A2AOptions       []a2asrv.RequestHandlerOption
 	PluginConfig     runner.PluginConfig
 	TelemetryOptions []telemetry.Option
+	// MaxPayloadSize limits the REST API server's request body size in bytes.
+	// The web launcher sets it from its -max_request_body_size flag, and a
+	// value set by an embedder is honored. The same limit is applied to the
+	// base router and the ADK REST API sublauncher. If <= 0, the adkrest
+	// default (10 MiB) is used.
+	MaxPayloadSize int64
 }
