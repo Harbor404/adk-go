@@ -44,6 +44,16 @@ type RuntimeAPIController struct {
 	autoCreateSession bool
 }
 
+// maxLiveMessageBytes is the read limit RunLiveHandler applies to a single
+// client-sent WebSocket message. Matches uvicorn's ws_max_size default,
+// which adk-python's dev servers (adk web, adk api_server) leave unset, so
+// a message either server accepts, the other does too.
+//
+// Unexported: nothing currently overrides it. If that's needed later, make
+// it configurable with zero meaning this default, the same way
+// ServerConfig.MaxPayloadSize works.
+const maxLiveMessageBytes = 16 << 20 // 16 MiB
+
 // NewRuntimeAPIController creates the controller for the Runtime API.
 func NewRuntimeAPIController(sessionService session.Service, memoryService memory.Service, agentLoader agent.Loader, artifactService artifact.Service, sseTimeout time.Duration, pluginConfig runner.PluginConfig, autoCreateSession bool) *RuntimeAPIController {
 	return &RuntimeAPIController{sessionService: sessionService, memoryService: memoryService, agentLoader: agentLoader, artifactService: artifactService, sseTimeout: sseTimeout, pluginConfig: pluginConfig, autoCreateSession: autoCreateSession}
@@ -279,6 +289,9 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 	defer func() {
 		_ = ws.Close()
 	}()
+
+	// The upgrade bypasses MaxBytesMiddleware, and gorilla/websocket has no default limit.
+	ws.SetReadLimit(maxLiveMessageBytes)
 
 	sendClose := func(code int, reason string) {
 		_ = ws.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(code, reason))
