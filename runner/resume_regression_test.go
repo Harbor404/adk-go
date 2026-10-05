@@ -20,6 +20,7 @@ import (
 	"iter"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"google.golang.org/genai"
 
@@ -155,7 +156,11 @@ func TestResumeRegression_ConfirmationInsideSequentialAgentNode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	node, err := workflow.NewAgentNode(seq, workflow.NodeConfig{})
+	// Wrapping a composite agent is an explicit opt-in after the default was
+	// narrowed to LlmAgent and remote A2A agents; this test pins the nested
+	// workflow behavior when the caller asks for re-entry.
+	rerun := true
+	node, err := workflow.NewAgentNode(seq, workflow.NodeConfig{RerunOnResume: &rerun})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +186,7 @@ func TestResumeRegression_ConfirmationInsideSequentialAgentNode(t *testing.T) {
 }
 
 // TestResumeRegression_ResumePromptIncludesHistory verifies that the model
-// call after a resumed confirmation still sees the original user prompt and
+// call after a resumed confirmation still sees the node's own input and
 // pending function call, rather than only the tool response.
 func TestResumeRegression_ResumePromptIncludesHistory(t *testing.T) {
 	m := &resumeRecordingModel{}
@@ -199,11 +204,11 @@ func TestResumeRegression_ResumePromptIncludesHistory(t *testing.T) {
 		t.Fatalf("model calls = %d, want at least 2", len(m.contents))
 	}
 
-	var sawPrompt, sawCall, sawResponse bool
+	var sawInput, sawCall, sawResponse bool
 	for _, content := range m.contents[1] {
 		for _, part := range content.Parts {
-			if part.Text == "start" {
-				sawPrompt = true
+			if part.Text == "prepared" {
+				sawInput = true
 			}
 			if fc := part.FunctionCall; fc != nil && fc.Name == "confirm_action" {
 				sawCall = true
@@ -213,14 +218,14 @@ func TestResumeRegression_ResumePromptIncludesHistory(t *testing.T) {
 			}
 		}
 	}
-	if !sawPrompt || !sawCall || !sawResponse {
+	if !sawInput || !sawCall || !sawResponse {
 		for i, content := range m.contents[1] {
 			t.Logf("content[%d] role=%q", i, content.Role)
 			for j, part := range content.Parts {
 				t.Logf("  part[%d]=%+v fc=%+v fr=%+v", j, part, part.FunctionCall, part.FunctionResponse)
 			}
 		}
-		t.Errorf("resume prompt missing required history: prompt=%v call=%v response=%v", sawPrompt, sawCall, sawResponse)
+		t.Errorf("resume prompt missing required context: input=%v call=%v response=%v", sawInput, sawCall, sawResponse)
 	}
 }
 
@@ -290,6 +295,283 @@ func TestResumeRegression_RootLlmAgentDuplicateReplyStartsFreshRun(t *testing.T)
 	}
 	if got := len(m.contents); got <= callsAfterResume {
 		t.Errorf("model calls after duplicate = %d, want more than %d", got, callsAfterResume)
+	}
+}
+
+// progressThenFailNode emits a non-terminal progress event and then fails on
+// its first resume. Its next attempt succeeds, proving the reply was not
+// consumed just because an event reached history.
+type progressThenFailNode struct {
+	workflow.BaseNode
+	failed atomic.Bool
+}
+
+func newProgressThenFailNode() *progressThenFailNode {
+	yes := true
+	return &progressThenFailNode{
+		BaseNode: workflow.NewBaseNode("asker", "", workflow.NodeConfig{RerunOnResume: &yes}),
+	}
+}
+
+func (n *progressThenFailNode) Run(ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		if resp, ok := ctx.ResumedInput("q"); ok {
+			if !n.failed.Swap(true) {
+				ev := session.NewEvent(ctx, ctx.InvocationID())
+				ev.Content = genai.NewContentFromText("working", genai.RoleModel)
+				if yield(ev, nil) {
+					yield(nil, errors.New("transient failure"))
+				}
+				return
+			}
+			ev := session.NewEvent(ctx, ctx.InvocationID())
+			ev.Output = resp
+			yield(ev, nil)
+			return
+		}
+		yield(workflow.NewRequestInputEvent(ctx, session.RequestInput{InterruptID: "q", Message: "q"}), nil)
+	}
+}
+
+// TestResumeRegression_RetryAfterProgressThenFailure verifies that a resume
+// which emitted progress before failing remains retryable with the same reply.
+func TestResumeRegression_RetryAfterProgressThenFailure(t *testing.T) {
+	asker := newProgressThenFailNode()
+	var sinkRuns atomic.Int32
+	sink := workflow.NewFunctionNode("sink", func(_ agent.Context, in any) (any, error) {
+		sinkRuns.Add(1)
+		return in, nil
+	}, workflow.NodeConfig{})
+	r := newWorkflowRunner(t, workflow.Chain(workflow.Start, asker, sink))
+
+	turn1, _ := runReturningErr(t, r, userText("start"))
+	id, name := findLongRunningInterrupt(turn1)
+	if _, err := runReturningErr(t, r, resumeContent(id, name, "ok")); err == nil {
+		t.Fatal("first resume: want the injected failure")
+	}
+	if _, err := runReturningErr(t, r, resumeContent(id, name, "ok")); err != nil {
+		t.Fatalf("retry with the same reply: %v", err)
+	}
+	if got := sinkRuns.Load(); got != 1 {
+		t.Errorf("sink runs = %d, want 1", got)
+	}
+}
+
+// parallelSuccessor emits an event on success; failFirst makes the first
+// attempt wait for the sibling branch and then fail once.
+type parallelSuccessor struct {
+	workflow.BaseNode
+	failFirst bool
+	wait      chan struct{}
+	done      chan struct{}
+	runs      atomic.Int32
+	failed    atomic.Bool
+}
+
+func (n *parallelSuccessor) Run(ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		n.runs.Add(1)
+		if n.failFirst && !n.failed.Swap(true) {
+			select {
+			case <-n.wait:
+			case <-time.After(2 * time.Second):
+			}
+			yield(nil, errors.New("transient failure"))
+			return
+		}
+		ev := session.NewEvent(ctx, ctx.InvocationID())
+		ev.Content = genai.NewContentFromText(n.Name()+" ran", genai.RoleModel)
+		if yield(ev, nil) && n.done != nil {
+			close(n.done)
+			n.done = nil
+		}
+	}
+}
+
+// allLongRunningInterrupts returns every interrupt ID in the turn keyed to
+// the function-call name that raised it.
+func allLongRunningInterrupts(events []*session.Event) map[string]string {
+	out := map[string]string{}
+	for _, ev := range events {
+		if ev == nil || len(ev.LongRunningToolIDs) == 0 || ev.Content == nil {
+			continue
+		}
+		for _, id := range ev.LongRunningToolIDs {
+			for _, part := range ev.Content.Parts {
+				if part != nil && part.FunctionCall != nil && part.FunctionCall.ID == id {
+					out[id] = part.FunctionCall.Name
+				}
+			}
+		}
+	}
+	return out
+}
+
+// TestResumeRegression_ParallelHandoffRetry verifies that one branch's
+// successor finishing does not consume the other branch's handoff reply.
+func TestResumeRegression_ParallelHandoffRetry(t *testing.T) {
+	saDone := make(chan struct{})
+	a := newHitlAsker("askA", "qa", false)
+	b := newHitlAsker("askB", "qb", false)
+	sa := &parallelSuccessor{BaseNode: workflow.NewBaseNode("sa", "", workflow.NodeConfig{}), done: saDone}
+	sb := &parallelSuccessor{BaseNode: workflow.NewBaseNode("sb", "", workflow.NodeConfig{}), failFirst: true, wait: saDone}
+	r := newWorkflowRunner(t, append(workflow.Chain(workflow.Start, a, sa), workflow.Chain(workflow.Start, b, sb)...))
+
+	turn1, _ := runReturningErr(t, r, userText("start"))
+	ints := allLongRunningInterrupts(turn1)
+	both := &genai.Content{Role: genai.RoleUser}
+	for id, name := range ints {
+		both.Parts = append(both.Parts, &genai.Part{FunctionResponse: &genai.FunctionResponse{
+			ID: id, Name: name, Response: map[string]any{"payload": "ans-" + id},
+		}})
+	}
+	if _, err := runReturningErr(t, r, both); err == nil {
+		t.Fatal("first resume: want branch B's injected failure")
+	}
+	if _, err := runReturningErr(t, r, resumeContent("qb", ints["qb"], "ans-qb")); err != nil {
+		t.Fatalf("retry of branch B: %v", err)
+	}
+	if got := sb.runs.Load(); got != 2 {
+		t.Errorf("branch B successor runs = %d, want 2", got)
+	}
+}
+
+func newGatedAgentNode(t *testing.T, name string, m model.LLM) *workflow.AgentNode {
+	t.Helper()
+	confirmTool, err := functiontool.New(functiontool.Config{
+		Name: "confirm_action", Description: "x", RequireConfirmation: true,
+	}, func(agent.Context, struct{}) (map[string]string, error) {
+		return map[string]string{"result": "executed"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := llmagent.New(llmagent.Config{Name: name, Model: m, Tools: []tool.Tool{confirmTool}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, err := workflow.NewAgentNode(a, workflow.NodeConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// TestResumeRegression_UnrelatedReplyDoesNotRestartGatedNode verifies that a
+// handoff reply is consumed when its successor reaches a terminal event, so a
+// later unrelated branch reply cannot restart the gated agent.
+func TestResumeRegression_UnrelatedReplyDoesNotRestartGatedNode(t *testing.T) {
+	m := &resumeRecordingModel{}
+	exec := newGatedAgentNode(t, "executor", m)
+	approve := newHitlAsker("approve", "ia", false)
+	other := newHitlAsker("other", "io", false)
+	osink := workflow.NewFunctionNode("osink", func(_ agent.Context, in any) (any, error) { return in, nil }, workflow.NodeConfig{})
+	r := newWorkflowRunner(t, append(workflow.Chain(workflow.Start, approve, exec), workflow.Chain(workflow.Start, other, osink)...))
+
+	turn1, _ := runReturningErr(t, r, userText("start"))
+	ints := allLongRunningInterrupts(turn1)
+	if _, err := runReturningErr(t, r, resumeContent("ia", ints["ia"], "go")); err != nil {
+		t.Fatalf("answering approve: %v", err)
+	}
+	before := len(m.contents)
+	if _, err := runReturningErr(t, r, resumeContent("io", ints["io"], "other")); err != nil {
+		t.Fatalf("answering unrelated asker: %v", err)
+	}
+	if got := len(m.contents); got != before {
+		t.Errorf("executor model calls %d -> %d after an unrelated reply", before, got)
+	}
+}
+
+// TestResumeRegression_SingleTurnNodeKeepsOwnContextOnResume verifies that a
+// single-turn node's resume request contains its own node input and pending
+// call, not an earlier unredacted upstream turn.
+func TestResumeRegression_SingleTurnNodeKeepsOwnContextOnResume(t *testing.T) {
+	writer, err := llmagent.New(llmagent.Config{
+		Name:  "writer",
+		Model: &scriptedModel{responses: []*genai.Content{genai.NewContentFromText("WRITER-PRIVATE", genai.RoleModel)}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wn, err := workflow.NewAgentNode(writer, workflow.NodeConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	redact := workflow.NewFunctionNode("redact", func(agent.Context, any) (any, error) { return "REDACTED", nil }, workflow.NodeConfig{})
+	m := &resumeRecordingModel{}
+	gn := newGatedAgentNode(t, "gated", m)
+	wf, err := workflowagent.New(workflowagent.Config{Name: workflowAgentName, Edges: workflow.Chain(workflow.Start, wn, redact, gn)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := session.InMemoryService()
+	newNodeTestSession(t, t.Context(), svc)
+	r := newNodeTestRunner(t, wf, svc)
+
+	turn1, _ := runReturningErr(t, r, userText("start"))
+	id, _ := findLongRunningInterrupt(turn1)
+	if _, err := runReturningErr(t, r, confirmationReply(id, true)); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	if len(m.contents) < 2 {
+		t.Fatalf("gated model calls = %d, want at least 2", len(m.contents))
+	}
+	var sawPrivate, sawInput bool
+	for _, content := range m.contents[1] {
+		for _, part := range content.Parts {
+			if part == nil {
+				continue
+			}
+			sawPrivate = sawPrivate || part.Text == "WRITER-PRIVATE" || part.Text == "[writer] said: WRITER-PRIVATE"
+			sawInput = sawInput || part.Text == "REDACTED"
+		}
+	}
+	if sawPrivate || !sawInput {
+		t.Errorf("resume request: contains writer text = %v, contains own input = %v; want false, true", sawPrivate, sawInput)
+	}
+}
+
+// TestResumeRegression_CustomAgentNodeKeepsHandoffDefault pins the
+// compatibility rule for custom agents: without an explicit opt-in their
+// successor still receives the resume payload, as on main.
+func TestResumeRegression_CustomAgentNodeKeepsHandoffDefault(t *testing.T) {
+	var customRuns atomic.Int32
+	custom, err := agent.New(agent.Config{
+		Name: "custom",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				customRuns.Add(1)
+				yield(workflow.NewRequestInputEvent(ctx, session.RequestInput{InterruptID: "custom-q", Message: "q"}), nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	node, err := workflow.NewAgentNode(custom, workflow.NodeConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rr := node.Config().RerunOnResume; rr != nil {
+		t.Errorf("custom AgentNode RerunOnResume = %v, want nil (handoff default)", *rr)
+	}
+	var got any
+	sink := workflow.NewFunctionNode("sink", func(_ agent.Context, in any) (any, error) {
+		got = in
+		return in, nil
+	}, workflow.NodeConfig{})
+	r := newWorkflowRunner(t, workflow.Chain(workflow.Start, node, sink))
+
+	turn1, _ := runReturningErr(t, r, userText("start"))
+	id, name := findLongRunningInterrupt(turn1)
+	if _, err := runReturningErr(t, r, resumeContent(id, name, "reply")); err != nil {
+		t.Fatalf("handoff resume: %v", err)
+	}
+	if customRuns.Load() != 1 {
+		t.Errorf("custom agent runs = %d, want 1", customRuns.Load())
+	}
+	if got != "reply" {
+		t.Errorf("successor input = %#v, want %q", got, "reply")
 	}
 }
 

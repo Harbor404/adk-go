@@ -153,11 +153,20 @@ func RunLLMAgentAsNode(a agent.Agent, ctx agent.Context, nodeInput any) iter.Seq
 			runChat(a, chatCtx, yield)
 		case llminternal.ModeSingleTurn, llminternal.ModeTask:
 			userContent := ctx.UserContent()
-			if nodeInput != nil {
+			// A resumed node arrives with both its original node input and the
+			// human's FunctionResponse in UserContent. Keep the response as the
+			// new user content so the pending call can be completed, while the
+			// seed below preserves the one-shot context that led to that call.
+			if nodeInput != nil && len(utils.FunctionResponses(userContent)) == 0 {
 				userContent = nodeInputToContent(nodeInput)
 			}
 			sess := ctx.Session()
 			if seed := PrepareLLMAgentInput(a, ctx, nodeInput); seed != nil {
+				if len(utils.FunctionResponses(ctx.UserContent())) > 0 {
+					if path := ctx.Path(); path != "" {
+						seed.NodeInfo = &session.NodeInfo{Path: path}
+					}
+				}
 				// A tool or callback context reports no session, and wrapping a
 				// nil one panics further down in telemetry. That panic predates
 				// this change; the set of callers that reach it does not. An
@@ -759,10 +768,42 @@ func newWrappedSession(orig session.Session, seed *session.Event) *wrappedSessio
 	w := &wrappedSession{Session: orig, appended: seed}
 	if orig != nil {
 		if ev := orig.Events(); ev != nil {
-			w.insertAt = ev.Len()
+			w.insertAt = seedInsertAt(ev, seed)
 		}
 	}
 	return w
+}
+
+// seedInsertAt places a transient node-input seed before the first event of
+// the same node activation. On a fresh run that is the end of history. On a
+// resume the pending call (and its FunctionResponse) already exist, so the
+// seed must stay before them; putting it at the tail would make the
+// current-turn scan pivot past the call and orphan the response.
+func seedInsertAt(events session.Events, seed *session.Event) int {
+	if events == nil {
+		return 0
+	}
+	if seed == nil || seed.NodeInfo == nil || seed.NodeInfo.Path == "" {
+		return events.Len()
+	}
+	path := seed.NodeInfo.Path
+	for i := 0; i < events.Len(); i++ {
+		ev := events.At(i)
+		if ev == nil || ev.NodeInfo == nil {
+			continue
+		}
+		if seed.InvocationID != "" && ev.InvocationID != "" && ev.InvocationID != seed.InvocationID {
+			continue
+		}
+		eventPath := ev.NodeInfo.Path
+		if eventPath == path ||
+			strings.HasPrefix(eventPath, path+"/") ||
+			strings.HasSuffix(eventPath, "/"+path) ||
+			strings.Contains(eventPath, "/"+path+"/") {
+			return i
+		}
+	}
+	return events.Len()
 }
 
 func (w *wrappedSession) Events() session.Events {

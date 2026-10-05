@@ -132,11 +132,11 @@ type NodeState struct {
 	interruptSchemas map[string]*jsonschema.Schema
 
 	// hasUnconsumedResponse is true when this node has a response that has
-	// not been consumed yet. Re-entry consumes its response by emitting
-	// another event; a handoff consumes it when a successor runs. A
-	// failed resume emits neither signal, so retrying the same payload
-	// remains possible, while a replay after success is rejected. Not
-	// persisted; rebuilt each turn from event history.
+	// not been consumed yet. Re-entry consumes its response when the node
+	// reaches a terminal outcome; handoff consumes it when a direct successor
+	// emits a non-partial event. A failed resume emits neither signal, so retrying the same payload
+	// remains possible, while a duplicate or different replay after success
+	// is rejected. Not persisted; rebuilt each turn from event history.
 	hasUnconsumedResponse bool
 
 	// Attempt is the number of times this node has been failed.

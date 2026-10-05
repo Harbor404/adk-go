@@ -68,13 +68,8 @@ func ContentsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest
 		// an unvalidated string, so a typo — "None", "defualt" — would hand a
 		// one-shot node the whole transcript. The merge base forced "none" here
 		// and so could not be misconfigured this way.
-		// A function response continues a tool exchange rather than starting a
-		// fresh user turn. Even a single-turn placement must retain enough
-		// history to pair that response with its call (and the prompt that led to
-		// it); hiding it would send an orphaned FunctionResponse to the model.
-		resuming := len(utils.FunctionResponses(ctx.UserContent())) > 0
 		placementHidesHistory := bound && boundMode == ModeSingleTurn &&
-			state.IncludeContents != IncludeContentsDefault && !resuming
+			state.IncludeContents != IncludeContentsDefault
 		fn := buildContentsDefault // anything but "none", unless the placement hides it.
 		if state.IncludeContents == IncludeContentsNone || placementHidesHistory {
 			fn = buildContentsCurrentTurnContextOnly
@@ -756,6 +751,7 @@ func mergeFunctionResponseEvents(functionResponseEvents []*session.Event) (*sess
 //	In multi-agent scenarios, the "current turn" for an agent starts from an
 //	actual user or from another agent.
 func buildContentsCurrentTurnContextOnly(agentName, branch, isolationScope string, events []*session.Event, isSingleTurn bool, userContent *genai.Content) ([]*genai.Content, error) {
+	resuming := len(utils.FunctionResponses(userContent)) > 0
 	// Find the latest event that starts the current turn and process from there
 	for i := len(events) - 1; i >= 0; i-- {
 		event := events[i]
@@ -772,7 +768,18 @@ func buildContentsCurrentTurnContextOnly(agentName, branch, isolationScope strin
 		if event.IsolationScope != isolationScope {
 			continue
 		}
-		if event.Author == "user" || isOtherAgentReply(agentName, event) {
+		if resuming && shouldExcludeEvent(event) {
+			continue
+		}
+		// Function responses and their surrounding tool bookkeeping continue
+		// an exchange; none of them starts a new turn.
+		if resuming && len(utils.FunctionResponses(utils.Content(event))) > 0 {
+			continue
+		}
+		if event.Author == "user" {
+			return buildContentsDefaultWithCallSource(agentName, branch, isolationScope, events[i:], events, isSingleTurn, userContent)
+		}
+		if isOtherAgentReply(agentName, event) {
 			return buildContentsDefaultWithCallSource(agentName, branch, isolationScope, events[i:], events, isSingleTurn, userContent)
 		}
 	}

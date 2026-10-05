@@ -25,6 +25,8 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	agentinternal "google.golang.org/adk/v2/internal/agent"
+	iremoteagent "google.golang.org/adk/v2/internal/agent/remoteagent"
 	internalcontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/session"
@@ -60,37 +62,66 @@ func newAgentNodeWithSchemasTyped[Input, Output any](a agent.Agent, inputSchema,
 	}, nil
 }
 
-// applyAgentNodeDefaults fills in AgentNode config defaults. Agent nodes
-// default to re-entry on resume: an interrupt raised anywhere inside the
-// wrapped agent must be delivered back to that agent so the pending tool call
-// can finish, rather than being forwarded to the node's successors as output.
-// An explicit caller value always wins.
-func applyAgentNodeDefaults(_ agent.Agent, cfg NodeConfig) NodeConfig {
+// applyAgentNodeDefaults fills in AgentNode config defaults.
+//
+// Only agents whose own runtime already knows how to continue an interrupted
+// exchange default to re-entry: LlmAgents and task-mode remote A2A agents.
+// Other wrapped agents keep the engine's base handoff behavior, matching
+// adk-python. An explicit caller value always wins.
+func applyAgentNodeDefaults(a agent.Agent, cfg NodeConfig) NodeConfig {
 	// The wrapped agent's Run already emits an invoke_agent span, so the
 	// scheduler must not add a redundant invoke_node wrapper.
 	cfg.EmitsOwnSpan = true
-	if cfg.RerunOnResume == nil {
+	if cfg.RerunOnResume == nil && defaultsToReentry(a) {
 		rerun := true
 		cfg.RerunOnResume = &rerun
 	}
 	return cfg
 }
 
+// defaultsToReentry reports whether a is an agent type whose runtime can
+// consume the resume response directly. Go's A2A remote agent is task-based,
+// so a live A2A remote-agent state is the task-mode case mirrored from
+// adk-python.
+func defaultsToReentry(a agent.Agent) bool {
+	if a == nil {
+		return false
+	}
+	if _, ok := a.(llminternal.Agent); ok {
+		return true
+	}
+	ia, ok := a.(agentinternal.Agent)
+	if !ok || ia == nil {
+		return false
+	}
+	state := agentinternal.Reveal(ia)
+	if state == nil || state.AgentType != agentinternal.TypeRemoteAgent {
+		return false
+	}
+	remoteState, ok := state.Config.(iremoteagent.RemoteAgentState)
+	return ok && remoteState.A2A != nil
+}
+
 // NewAgentNodeWithSchemas is a convenience wrapper for NewAgentNodeWithSchemasTyped[any, any].
-// It uses explicitly provided schemas for both input and output.
+// It uses explicitly provided schemas for both input and output. LlmAgent and
+// task-mode remote A2A agents default RerunOnResume to true unless the caller
+// explicitly sets it; other agents keep the engine default.
 func NewAgentNodeWithSchemas(a agent.Agent, inputSchema, outputSchema *jsonschema.Schema, cfg NodeConfig) (*AgentNode, error) {
 	return newAgentNodeWithSchemasTyped[any, any](a, inputSchema, outputSchema, cfg)
 }
 
 // NewAgentNodeTyped creates a new node wrapping an agent using generics to
 // automatically infer input and output schemas from the provided types.
+// LlmAgent and task-mode remote A2A agents default RerunOnResume to true
+// unless the caller explicitly sets it; other agents keep the engine default.
 func NewAgentNodeTyped[Input, Output any](a agent.Agent, cfg NodeConfig) (*AgentNode, error) {
 	return newAgentNodeWithSchemasTyped[Input, Output](a, nil, nil, cfg)
 }
 
 // NewAgentNode creates a new node wrapping an agent. Input and output schemas
-// are inferred as `any`. The node defaults RerunOnResume to true unless the
-// caller explicitly sets it.
+// are inferred as `any`. LlmAgent and task-mode remote A2A agents default
+// RerunOnResume to true unless the caller explicitly sets it; other agents
+// keep the engine default.
 func NewAgentNode(a agent.Agent, cfg NodeConfig) (*AgentNode, error) {
 	return NewAgentNodeTyped[any, any](a, cfg)
 }
@@ -116,11 +147,12 @@ func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, 
 		}
 
 		// A resumed node consumes the current user content (the tool reply).
-		// Re-feeding its original input would create a synthetic turn and make
-		// the wrapped agent issue the same pending call again instead of
-		// finishing the interrupted one.
+		// Keep the original input too: RunLLMAgentAsNode uses it to seed the
+		// one-shot prompt before the pending call while still delivering the
+		// reply as UserContent. Non-LLM NodeRunners that use input directly
+		// should make the same split themselves; the default handoff mode means
+		// they are not re-entered unless the caller opts in.
 		if n.isResuming(ctx) {
-			input = nil
 			userContent = ctx.UserContent()
 		}
 
@@ -168,6 +200,9 @@ func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, 
 		}
 		agentCtx := internalcontext.NewInvocationContext(bound, params)
 		exCtx := agent.NewContext(agentCtx)
+		if path := ctx.Path(); path != "" {
+			exCtx = exCtx.WithDelta(&agent.CommonContextDelta{Path: &path})
+		}
 
 		type NodeRunner interface {
 			RunNode(ctx agent.Context, nodeInput any) iter.Seq2[*session.Event, error]

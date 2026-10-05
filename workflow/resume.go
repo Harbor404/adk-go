@@ -64,11 +64,14 @@ var ErrNothingToResume = errors.New("workflow: no waiting node matched the suppl
 //     - A handoff node is set to NodeCompleted and its response is
 //     routed to its successors without re-running the asker.
 //
-//     A response is consumed once the node emits another event
-//     (re-entry) or a successor runs (handoff). Replaying a consumed
-//     response yields ErrNothingToResume rather than rerunning the
-//     node. A resume that failed before consuming the response remains
-//     retryable with the same payload.
+//     A re-entry response is consumed once that node reaches a
+//     terminal outcome: output, a route/transfer, or a follow-up
+//     interrupt. A handoff response is consumed once one of its direct
+//     successors emits a non-partial event. A duplicate payload, or a
+//     different payload for the same consumed interrupt, yields
+//     ErrNothingToResume rather than rerunning the node. A resume that
+//     failed before either terminal outcome remains retryable with the
+//     same payload.
 //
 // Waiting nodes whose InterruptID is absent from responses remain
 // in NodeWaiting unchanged.
