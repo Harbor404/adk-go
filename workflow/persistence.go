@@ -16,7 +16,6 @@ package workflow
 
 import (
 	"fmt"
-	"reflect"
 	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
@@ -35,10 +34,12 @@ type nodeScanState struct {
 	seen       map[string]struct{}
 	// resolved maps an interrupt ID to the (last) user response.
 	resolved map[string]any
-	// replayed marks an interrupt whose latest answer is identical to the
-	// previous one. Different answers for the same long-running call are new
-	// updates and must still resume the node.
-	replayed map[string]bool
+	// settled marks responses the node has already consumed. A node emits an
+	// event after a successful re-entry (its output or a follow-up pause), so a
+	// later reply for that interrupt must not run it again. A resume that
+	// failed before the node emitted anything leaves the response unsettled and
+	// therefore retryable with the same payload.
+	settled map[string]bool
 	// schemas maps an interrupt ID to its declared response schema,
 	// re-extracted from the pause FunctionCall args.
 	schemas map[string]*jsonschema.Schema
@@ -128,7 +129,7 @@ func scanHistory(events session.Events, nodesByName map[string]Node, invocationI
 		if s == nil {
 			s = &nodeScanState{
 				resolved: map[string]any{},
-				replayed: map[string]bool{},
+				settled:  map[string]bool{},
 				schemas:  map[string]*jsonschema.Schema{},
 			}
 			scans[name] = s
@@ -161,11 +162,7 @@ func scanHistory(events session.Events, nodesByName map[string]Node, invocationI
 					continue
 				}
 				sf := scanFor(owner)
-				resp := utils.UnwrapResponse(fr.Response)
-				if prev, ok := sf.resolved[fr.ID]; ok {
-					sf.replayed[fr.ID] = reflect.DeepEqual(prev, resp)
-				}
-				sf.resolved[fr.ID] = resp
+				sf.resolved[fr.ID] = utils.UnwrapResponse(fr.Response)
 			}
 			continue
 		}
@@ -178,6 +175,26 @@ func scanHistory(events session.Events, nodesByName map[string]Node, invocationI
 			continue
 		}
 		s := scanFor(owner)
+		// A re-entry node consumes its response when it emits its own next
+		// event. A handoff node owns no later event, so completion of a
+		// successor is the signal that its response was consumed. Keep the bit
+		// set across later duplicate replies so they cannot revive a finished
+		// node; a resume that failed before either signal leaves the response
+		// unsettled and retryable with the same payload.
+		if rerunsOnResume(nodesByName[owner]) {
+			for id := range s.resolved {
+				s.settled[id] = true
+			}
+		} else {
+			for name, scan := range scans {
+				if rerunsOnResume(nodesByName[name]) {
+					continue
+				}
+				for id := range scan.resolved {
+					scan.settled[id] = true
+				}
+			}
+		}
 		if ev.Output != nil {
 			s.branch = ev.Branch
 		}
@@ -334,8 +351,8 @@ func (w *Workflow) inferNodeState(node Node, scan *nodeScanState, nodeOutputs ma
 
 	ns := &NodeState{Branch: scan.branch, interruptSchemas: scan.schemas}
 	for id := range resumed {
-		if !scan.replayed[id] {
-			ns.answeredThisTurn = true
+		if !scan.settled[id] {
+			ns.hasUnconsumedResponse = true
 			break
 		}
 	}

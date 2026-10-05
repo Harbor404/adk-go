@@ -328,7 +328,7 @@ func buildResumeResponses(msg *genai.Content, state *workflow.RunState, sess ses
 	}
 	pending := map[string]struct{}{}
 	if state != nil {
-		for id := range resumableInterruptIDs(state) {
+		for id := range waitingInterruptIDs(state) {
 			pending[id] = struct{}{}
 		}
 	}
@@ -383,24 +383,15 @@ func openLongRunningCallIDs(sess session.Session) map[string]struct{} {
 	return open
 }
 
-// resumableInterruptIDs returns interrupt IDs that can be carried into
-// Workflow.Resume: open interrupts on waiting nodes and answers already folded
-// into a rehydrated node. The latter is how an inner RunNode sees the current
-// reply that caused its enclosing AgentNode to re-enter.
-func resumableInterruptIDs(state *workflow.RunState) map[string]struct{} {
+// waitingInterruptIDs returns the set of interrupt IDs for every node
+// in state that is currently paused on a long-running interrupt.
+func waitingInterruptIDs(state *workflow.RunState) map[string]struct{} {
 	ids := map[string]struct{}{}
 	for _, ns := range state.Nodes {
-		if ns == nil {
+		if ns == nil || ns.Status != workflow.NodeWaiting {
 			continue
 		}
-		if ns.Status == workflow.NodeWaiting {
-			for _, id := range ns.Interrupts {
-				if id != "" {
-					ids[id] = struct{}{}
-				}
-			}
-		}
-		for id := range ns.ResumedInputs {
+		for _, id := range ns.Interrupts {
 			if id != "" {
 				ids[id] = struct{}{}
 			}

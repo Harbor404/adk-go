@@ -60,17 +60,15 @@ func newAgentNodeWithSchemasTyped[Input, Output any](a agent.Agent, inputSchema,
 	}, nil
 }
 
-// applyAgentNodeDefaults fills in AgentNode config defaults. An LlmAgent node
-// defaults to re-entry on resume so it can finish the long-running tool call
-// that paused it, instead of handing the raw reply to its successor. Other
-// kinds keep the engine default, and an explicit caller value always wins.
-func applyAgentNodeDefaults(a agent.Agent, cfg NodeConfig) NodeConfig {
+// applyAgentNodeDefaults fills in AgentNode config defaults. Agent nodes
+// default to re-entry on resume: an interrupt raised anywhere inside the
+// wrapped agent must be delivered back to that agent so the pending tool call
+// can finish, rather than being forwarded to the node's successors as output.
+// An explicit caller value always wins.
+func applyAgentNodeDefaults(_ agent.Agent, cfg NodeConfig) NodeConfig {
 	// The wrapped agent's Run already emits an invoke_agent span, so the
 	// scheduler must not add a redundant invoke_node wrapper.
 	cfg.EmitsOwnSpan = true
-	if _, ok := a.(llminternal.Agent); !ok {
-		return cfg
-	}
 	if cfg.RerunOnResume == nil {
 		rerun := true
 		cfg.RerunOnResume = &rerun
@@ -91,7 +89,8 @@ func NewAgentNodeTyped[Input, Output any](a agent.Agent, cfg NodeConfig) (*Agent
 }
 
 // NewAgentNode creates a new node wrapping an agent. Input and output schemas
-// are inferred as `any`.
+// are inferred as `any`. The node defaults RerunOnResume to true unless the
+// caller explicitly sets it.
 func NewAgentNode(a agent.Agent, cfg NodeConfig) (*AgentNode, error) {
 	return NewAgentNodeTyped[any, any](a, cfg)
 }
@@ -116,10 +115,11 @@ func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, 
 			return
 		}
 
-		// An LlmAgent resumes from session history. Re-feeding its original
-		// node input would create a synthetic turn and make it issue the same
-		// pending tool call again instead of consuming the user's reply.
-		if _, ok := n.agent.(llminternal.Agent); ok && n.isResuming(ctx) {
+		// A resumed node consumes the current user content (the tool reply).
+		// Re-feeding its original input would create a synthetic turn and make
+		// the wrapped agent issue the same pending call again instead of
+		// finishing the interrupted one.
+		if n.isResuming(ctx) {
 			input = nil
 			userContent = ctx.UserContent()
 		}
@@ -260,10 +260,29 @@ func (n *AgentNode) isResuming(ctx agent.Context) bool {
 }
 
 func pathMatchesNode(eventPath, nodePath string) bool {
-	if eventPath == nodePath || strings.HasSuffix(eventPath, "/"+nodePath) {
-		return true
+	eventPath = staticPath(eventPath)
+	nodePath = staticPath(nodePath)
+	return eventPath == nodePath ||
+		strings.HasPrefix(eventPath, nodePath+"/") ||
+		strings.HasSuffix(eventPath, "/"+nodePath) ||
+		strings.Contains(eventPath, "/"+nodePath+"/")
+}
+
+// staticPath strips run suffixes such as "@1" from each path segment. Node
+// activation paths carry a run ID, while descendant events include the
+// parent's path followed by the child's path, so comparing static paths lets
+// an AgentNode recognize interrupts raised by a wrapped composite agent.
+func staticPath(path string) string {
+	if path == "" {
+		return ""
 	}
-	return strings.Contains(eventPath, "/"+nodePath+"/")
+	segments := strings.Split(path, "/")
+	for i, segment := range segments {
+		if at := strings.IndexByte(segment, '@'); at >= 0 {
+			segments[i] = segment[:at]
+		}
+	}
+	return strings.Join(segments, "/")
 }
 
 // synthesizeAgentOutput sets Event.Output from concatenated model

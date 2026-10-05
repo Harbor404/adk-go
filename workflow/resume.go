@@ -60,16 +60,15 @@ var ErrNothingToResume = errors.New("workflow: no waiting node matched the suppl
 //
 //     - A re-entry node (RerunOnResume) is set to NodePending and
 //     scheduled again with the response delivered via
-//     ctx.ResumedInput, so a duplicate Resume re-runs it a second
-//     time.
+//     ctx.ResumedInput.
 //     - A handoff node is set to NodeCompleted and its response is
-//     routed to its successors without re-running the asker; a
-//     duplicate Resume then matches no waiting node and yields
-//     ErrNothingToResume.
+//     routed to its successors without re-running the asker.
 //
-//     A caller that must treat a double-submit as success therefore
-//     has to tolerate ErrNothingToResume. It is never a no-op in the
-//     re-entry case.
+//     A response is consumed once the node emits another event
+//     (re-entry) or a successor runs (handoff). Replaying a consumed
+//     response yields ErrNothingToResume rather than rerunning the
+//     node. A resume that failed before consuming the response remains
+//     retryable with the same payload.
 //
 // Waiting nodes whose InterruptID is absent from responses remain
 // in NodeWaiting unchanged.
@@ -104,13 +103,11 @@ func (w *Workflow) Resume(
 		var deferredHandoffs []deferredHandoff
 		scheduled := 0
 
-		// Act on each node the rehydration reconstructed, but only
-		// for interrupts answered in THIS turn (present in responses).
-		// Gating on the current turn's responses keeps a duplicate
-		// Resume from acting on an already-consumed interrupt. For a
-		// handoff node that leaves nothing to reschedule; a re-entry
-		// node is rescheduled regardless, as step 2 describes. Mirrors
-		// adk-python gating _extract_resume_output on ctx.resume_inputs.
+		// Act on each rehydrated node that still has an unconsumed
+		// response. Rehydration marks responses consumed when the node
+		// emitted its next event or a handoff successor ran, so a stale
+		// or duplicate reply reaches the final ErrNothingToResume instead
+		// of replaying completed work.
 		for name, ns := range state.Nodes {
 			node := s.nodesByName[name]
 			if node == nil {
@@ -145,7 +142,7 @@ func (w *Workflow) Resume(
 					continue
 				}
 			}
-			if !ns.answeredThisTurn && len(freshMatched) == 0 {
+			if !ns.hasUnconsumedResponse && len(freshMatched) == 0 {
 				continue
 			}
 
@@ -182,12 +179,10 @@ func (w *Workflow) Resume(
 				// A matched asker is itself an effective resume even
 				// when terminal (no successors to count in Pass 2):
 				// without this a single-asker workflow would wrongly
-				// report ErrNothingToResume. answeredThisTurn gates on
-				// the response differing from the previous one
-				// (rehydration sets it during history scanning), so an
-				// identical replay stays a no-op. freshMatched covers the runner-direct path
-				// where the response is not yet in history.
-				if ns.answeredThisTurn || len(freshMatched) > 0 {
+				// report ErrNothingToResume. hasUnconsumedResponse is false
+				// once the response was consumed; freshMatched covers
+				// the runner-direct path where it is not yet in history.
+				if ns.hasUnconsumedResponse || len(freshMatched) > 0 {
 					scheduled++
 				}
 			}

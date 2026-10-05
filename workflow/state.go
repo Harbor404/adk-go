@@ -131,12 +131,13 @@ type NodeState struct {
 	// on NodeState). Consumed by Resume to validate the payload.
 	interruptSchemas map[string]*jsonschema.Schema
 
-	// answeredThisTurn is true when this node's latest user response
-	// differs from the previous response for that interrupt. Not
-	// persisted; rebuilt each turn from event history. This lets
-	// Resume act on a new long-running update or a retry while
-	// treating an identical replay as a no-op (idempotency).
-	answeredThisTurn bool
+	// hasUnconsumedResponse is true when this node has a response that has
+	// not been consumed yet. Re-entry consumes its response by emitting
+	// another event; a handoff consumes it when a successor runs. A
+	// failed resume emits neither signal, so retrying the same payload
+	// remains possible, while a replay after success is rejected. Not
+	// persisted; rebuilt each turn from event history.
+	hasUnconsumedResponse bool
 
 	// Attempt is the number of times this node has been failed.
 	Attempt int `json:"attempt,omitempty"`

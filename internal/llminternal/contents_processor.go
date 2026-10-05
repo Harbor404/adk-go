@@ -68,8 +68,13 @@ func ContentsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest
 		// an unvalidated string, so a typo — "None", "defualt" — would hand a
 		// one-shot node the whole transcript. The merge base forced "none" here
 		// and so could not be misconfigured this way.
+		// A function response continues a tool exchange rather than starting a
+		// fresh user turn. Even a single-turn placement must retain enough
+		// history to pair that response with its call (and the prompt that led to
+		// it); hiding it would send an orphaned FunctionResponse to the model.
+		resuming := len(utils.FunctionResponses(ctx.UserContent())) > 0
 		placementHidesHistory := bound && boundMode == ModeSingleTurn &&
-			state.IncludeContents != IncludeContentsDefault
+			state.IncludeContents != IncludeContentsDefault && !resuming
 		fn := buildContentsDefault // anything but "none", unless the placement hides it.
 		if state.IncludeContents == IncludeContentsNone || placementHidesHistory {
 			fn = buildContentsCurrentTurnContextOnly
