@@ -35,10 +35,11 @@ type nodeScanState struct {
 	// resolved maps an interrupt ID to the (last) user response.
 	resolved map[string]any
 	// settled marks responses the node has already consumed. A re-entry
-	// response is settled by a terminal event from the node; a handoff response
-	// is settled by a non-partial event from one of its direct successors. A
-	// resume that failed before reaching either outcome leaves the response
-	// unsettled and therefore retryable with the same payload.
+	// response is settled by a successful resume checkpoint; a handoff response
+	// is settled by a non-partial event from one of its direct successors or by
+	// a checkpoint for a terminal asker with no successors. A resume that failed
+	// before reaching either outcome leaves the response unsettled and therefore
+	// retryable with the same payload.
 	settled map[string]bool
 	// schemas maps an interrupt ID to its declared response schema,
 	// re-extracted from the pause FunctionCall args.
@@ -92,6 +93,7 @@ func (w *Workflow) ReconstructRunState(sess session.Session, invocationID string
 	// re-entry node's input: every node's cached output, the set of
 	// nodes that ran, and the workflow's seed input.
 	nodeOutputs, completed := collectNodeOutputs(events, nodesByName, invocationID)
+	addHandoffResumeOutputs(scans, nodesByName, nodeOutputs)
 	workflowInput := firstUserInput(events, invocationID)
 
 	// Stage 3: turn each interrupted node's scan into a NodeState.
@@ -175,11 +177,17 @@ func (w *Workflow) scanHistory(events session.Events, nodesByName map[string]Nod
 			continue
 		}
 		s := scanFor(owner)
-		// A re-entry response is consumed only by a terminal event from the
-		// node that owns it. A progress event followed by an error is not
-		// terminal, so that failed resume remains retryable.
-		if isConsumptionEvent(ev) && rerunsOnResume(nodesByName[owner]) {
-			settleResolved(s)
+		// A re-entry response is consumed only after the resumed activation
+		// completes successfully. The scheduler persists that outcome as a
+		// checkpoint event, so a progress event followed by an error does not
+		// consume the response.
+		if ev.NodeInfo != nil && len(ev.NodeInfo.ResumeConsumedIDs) > 0 {
+			for _, id := range ev.NodeInfo.ResumeConsumedIDs {
+				if id != "" {
+					s.settled[id] = true
+				}
+			}
+			continue
 		}
 		// A handoff node owns no later event. Its response belongs to that node
 		// and its direct successors, so a non-partial event from a successor
@@ -217,25 +225,9 @@ func (w *Workflow) scanHistory(events session.Events, nodesByName map[string]Nod
 	return scans
 }
 
-// isConsumptionEvent reports whether ev is a terminal outcome from a node:
-// the node produced output, chose a route, transferred, or paused on a new
-// interrupt. Plain progress/content events are deliberately not sufficient:
-// a node can emit one and then fail, and that resume must remain retryable.
-func isConsumptionEvent(ev *session.Event) bool {
-	if ev == nil || ev.LLMResponse.Partial {
-		return false
-	}
-	return ev.Output != nil ||
-		ev.RequestedInput != nil ||
-		len(ev.Routes) > 0 ||
-		len(ev.LongRunningToolIDs) > 0 ||
-		ev.Actions.TransferToAgent != "" ||
-		(ev.NodeInfo != nil && ev.NodeInfo.MessageAsOutput && ev.Content != nil)
-}
-
 // settleResolved marks every response currently observed for this node as
 // consumed. Later duplicate user replies keep the bit set; an unresolved or
-// not-yet-terminal response keeps it clear.
+// not-yet-successful response keeps it clear.
 func settleResolved(scan *nodeScanState) {
 	if scan == nil {
 		return
@@ -293,6 +285,33 @@ func collectNodeOutputs(events session.Events, nodesByName map[string]Node, invo
 		}
 	}
 	return outputs, completed
+}
+
+// addHandoffResumeOutputs reconstructs the output a handoff asker produced from
+// the user response itself. That response is deliberately not emitted as a node
+// event, so without this a successor resumed after the handoff sees a nil input.
+func addHandoffResumeOutputs(scans map[string]*nodeScanState, nodesByName map[string]Node, outputs map[string]any) {
+	for name, scan := range scans {
+		node := nodesByName[name]
+		if node == nil || rerunsOnResume(node) || len(scan.resolved) == 0 {
+			continue
+		}
+		responses := make(map[string]any, len(scan.resolved))
+		for id, resp := range scan.resolved {
+			if !scan.settled[id] {
+				responses = nil
+				break
+			}
+			responses[id] = resp
+		}
+		if len(responses) == 0 {
+			continue
+		}
+		if _, ok := outputs[name]; ok {
+			continue
+		}
+		outputs[name] = resumeOutput(responses)
+	}
 }
 
 // buildRunState maps each interrupted node's scan to a NodeState via

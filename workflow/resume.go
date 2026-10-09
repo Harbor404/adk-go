@@ -64,14 +64,15 @@ var ErrNothingToResume = errors.New("workflow: no waiting node matched the suppl
 //     - A handoff node is set to NodeCompleted and its response is
 //     routed to its successors without re-running the asker.
 //
-//     A re-entry response is consumed once that node reaches a
-//     terminal outcome: output, a route/transfer, or a follow-up
-//     interrupt. A handoff response is consumed once one of its direct
-//     successors emits a non-partial event. A duplicate payload, or a
+//     A re-entry response is consumed once its resumed activation
+//     completes successfully, whatever events it did or did not emit.
+//     A handoff response is consumed once one of its direct successors
+//     emits a non-partial event, or when an asker with no successors
+//     completes the handoff successfully. A duplicate payload, or a
 //     different payload for the same consumed interrupt, yields
 //     ErrNothingToResume rather than rerunning the node. A resume that
-//     failed before either terminal outcome remains retryable with the
-//     same payload.
+//     failed before either outcome remains retryable with the same
+//     payload.
 //
 // Waiting nodes whose InterruptID is absent from responses remain
 // in NodeWaiting unchanged.
@@ -100,8 +101,9 @@ func (w *Workflow) Resume(
 		// before it is evaluated. Re-entry-mode askers are
 		// unaffected — they re-run rather than complete here.
 		type deferredHandoff struct {
-			node Node
-			resp any
+			node     Node
+			resp     any
+			consumed []string
 		}
 		var deferredHandoffs []deferredHandoff
 		scheduled := 0
@@ -176,8 +178,15 @@ func (w *Workflow) Resume(
 				ns.Status = NodeCompleted
 				ns.Output = out
 				ns.Interrupts = nil
+				consumed := map[string]any{}
+				for id, resp := range ns.ResumedInputs {
+					consumed[id] = resp
+				}
+				for id, resp := range freshMatched {
+					consumed[id] = resp
+				}
 				deferredHandoffs = append(deferredHandoffs, deferredHandoff{
-					node: node, resp: out,
+					node: node, resp: out, consumed: resumeInputIDs(consumed),
 				})
 				// A matched asker is itself an effective resume even
 				// when terminal (no successors to count in Pass 2):
@@ -225,8 +234,36 @@ func (w *Workflow) Resume(
 			return
 		}
 
-		s.run(yield)
+		var runErr error
+		consumerStopped := false
+		s.run(func(ev *session.Event, err error) bool {
+			if err != nil && runErr == nil {
+				runErr = err
+			}
+			if !yield(ev, err) {
+				consumerStopped = true
+				return false
+			}
+			return true
+		})
 		s.wg.Wait()
+		if runErr != nil || consumerStopped {
+			return
+		}
+
+		// A terminal handoff asker has no successor event to prove that its
+		// response was consumed. Record a successful-resume checkpoint so a
+		// later duplicate or changed reply is rejected.
+		for _, h := range deferredHandoffs {
+			if len(w.graph.successorsOf(h.node)) > 0 {
+				continue
+			}
+			if ev := newResumeConsumedEvent(ctx, h.node.Name(), h.node.Name(), h.consumed); ev != nil {
+				if !yield(ev, nil) {
+					return
+				}
+			}
+		}
 	}
 }
 

@@ -162,9 +162,16 @@ func RunLLMAgentAsNode(a agent.Agent, ctx agent.Context, nodeInput any) iter.Seq
 			}
 			sess := ctx.Session()
 			if seed := PrepareLLMAgentInput(a, ctx, nodeInput); seed != nil {
-				if len(utils.FunctionResponses(ctx.UserContent())) > 0 {
+				var resumeIDs map[string]struct{}
+				if frs := utils.FunctionResponses(ctx.UserContent()); len(frs) > 0 {
 					if path := ctx.Path(); path != "" {
 						seed.NodeInfo = &session.NodeInfo{Path: path}
+					}
+					resumeIDs = make(map[string]struct{}, len(frs))
+					for _, fr := range frs {
+						if fr != nil && fr.ID != "" {
+							resumeIDs[fr.ID] = struct{}{}
+						}
 					}
 				}
 				// A tool or callback context reports no session, and wrapping a
@@ -180,7 +187,7 @@ func RunLLMAgentAsNode(a agent.Agent, ctx agent.Context, nodeInput any) iter.Seq
 					yield(nil, fmt.Errorf("RunLLMAgentAsNode: LlmAgent %q needs a session to seed its input, which a tool or callback context does not provide", a.Name()))
 					return
 				}
-				sess = newWrappedSession(sess, seed)
+				sess = newWrappedSession(sess, seed, resumeIDs)
 			}
 			ic := icontext.NewInvocationContext(bound, icontext.InvocationContextParams{
 				Artifacts:      ctx.Artifacts(),
@@ -764,11 +771,15 @@ type wrappedSession struct {
 	insertAt int
 }
 
-func newWrappedSession(orig session.Session, seed *session.Event) *wrappedSession {
+func newWrappedSession(orig session.Session, seed *session.Event, resumeIDs ...map[string]struct{}) *wrappedSession {
 	w := &wrappedSession{Session: orig, appended: seed}
 	if orig != nil {
 		if ev := orig.Events(); ev != nil {
-			w.insertAt = seedInsertAt(ev, seed)
+			var ids map[string]struct{}
+			if len(resumeIDs) > 0 {
+				ids = resumeIDs[0]
+			}
+			w.insertAt = seedInsertAt(ev, seed, ids)
 		}
 	}
 	return w
@@ -779,7 +790,7 @@ func newWrappedSession(orig session.Session, seed *session.Event) *wrappedSessio
 // resume the pending call (and its FunctionResponse) already exist, so the
 // seed must stay before them; putting it at the tail would make the
 // current-turn scan pivot past the call and orphan the response.
-func seedInsertAt(events session.Events, seed *session.Event) int {
+func seedInsertAt(events session.Events, seed *session.Event, resumeIDs ...map[string]struct{}) int {
 	if events == nil {
 		return 0
 	}
@@ -787,6 +798,55 @@ func seedInsertAt(events session.Events, seed *session.Event) int {
 		return events.Len()
 	}
 	path := seed.NodeInfo.Path
+
+	var ids map[string]struct{}
+	if len(resumeIDs) > 0 {
+		ids = resumeIDs[0]
+	}
+	if len(ids) > 0 {
+		resumeCall := -1
+		for i := 0; i < events.Len(); i++ {
+			ev := events.At(i)
+			if ev == nil || ev.NodeInfo == nil {
+				continue
+			}
+			if seed.InvocationID != "" && ev.InvocationID != "" && ev.InvocationID != seed.InvocationID {
+				continue
+			}
+			if !eventPathMatchesNode(ev.NodeInfo.Path, path) {
+				continue
+			}
+			for _, id := range ev.LongRunningToolIDs {
+				if _, ok := ids[id]; ok {
+					resumeCall = i
+					break
+				}
+			}
+			if resumeCall >= 0 {
+				break
+			}
+		}
+		// The long-running interrupt is emitted after the tool invocation it
+		// belongs to. Start the current activation at that invocation, not at
+		// the interrupt itself: prompt rearrangement needs the original call
+		// and response when the confirmation processor re-dispatches the tool.
+		if resumeCall >= 0 {
+			for i := resumeCall - 1; i >= 0; i-- {
+				ev := events.At(i)
+				if ev == nil || ev.NodeInfo == nil {
+					continue
+				}
+				if seed.InvocationID != "" && ev.InvocationID != "" && ev.InvocationID != seed.InvocationID {
+					continue
+				}
+				if eventPathMatchesNode(ev.NodeInfo.Path, path) && len(utils.FunctionCalls(utils.Content(ev))) > 0 {
+					return i
+				}
+			}
+			return resumeCall
+		}
+	}
+
 	for i := 0; i < events.Len(); i++ {
 		ev := events.At(i)
 		if ev == nil || ev.NodeInfo == nil {
@@ -795,15 +855,18 @@ func seedInsertAt(events session.Events, seed *session.Event) int {
 		if seed.InvocationID != "" && ev.InvocationID != "" && ev.InvocationID != seed.InvocationID {
 			continue
 		}
-		eventPath := ev.NodeInfo.Path
-		if eventPath == path ||
-			strings.HasPrefix(eventPath, path+"/") ||
-			strings.HasSuffix(eventPath, "/"+path) ||
-			strings.Contains(eventPath, "/"+path+"/") {
+		if eventPathMatchesNode(ev.NodeInfo.Path, path) {
 			return i
 		}
 	}
 	return events.Len()
+}
+
+func eventPathMatchesNode(eventPath, nodePath string) bool {
+	return eventPath == nodePath ||
+		strings.HasPrefix(eventPath, nodePath+"/") ||
+		strings.HasSuffix(eventPath, "/"+nodePath) ||
+		strings.Contains(eventPath, "/"+nodePath+"/")
 }
 
 func (w *wrappedSession) Events() session.Events {
